@@ -77,8 +77,28 @@ Supabase の Google プロバイダ設定（client ID / secret）を Web 版と�
 open CollegeApp.xcodeproj
 ```
 
-署名は未設定（`CODE_SIGN_STYLE = Automatic`）。実機で動かす場合は
-ターゲットの Signing & Capabilities で自分の Team を選ぶ。
+署名は自動（`CODE_SIGN_STYLE = Automatic` / `DEVELOPMENT_TEAM = YGG499QVBP`）。
+別の Apple Developer アカウントでビルドする場合は、ターゲットの
+Signing & Capabilities で Team を差し替える。
+
+### 5. 実機で動かす
+
+```sh
+DEVICE=$(xcrun devicectl list devices | awk '/physical/ {print $(NF-2)}')
+DD=/tmp/CollegeAppBuild
+
+xcodebuild -project CollegeApp.xcodeproj -scheme CollegeApp \
+  -destination "platform=iOS,id=$DEVICE" \
+  -derivedDataPath "$DD" -allowProvisioningUpdates build
+
+xcrun devicectl device install app --device "$DEVICE" \
+  "$DD/Build/Products/Debug-iphoneos/CollegeApp.app"
+
+xcrun devicectl device process launch --device "$DEVICE" --terminate-existing \
+  college.hlab.CollegeApp
+```
+
+Xcode から実行する場合は、デバイスを選んで ⌘R でよい。
 
 ---
 
@@ -96,11 +116,12 @@ Xcode のスキーム > Run > Arguments > **Arguments Passed On Launch** に追�
 コマンドラインから動かす場合:
 
 ```sh
-xcodebuild -project CollegeApp.xcodeproj -scheme CollegeApp \
-  -destination 'platform=iOS Simulator,name=iPhone 18 Pro' build
-
-xcrun simctl install booted <...>/CollegeApp.app
+# シミュレータ
 xcrun simctl launch booted college.hlab.CollegeApp -WebAPIBaseURL http://localhost:3000
+
+# 実機（Mac と同じ Wi-Fi につないでおく。next dev は -H 0.0.0.0 で起動する）
+xcrun devicectl device process launch --device "$DEVICE" --terminate-existing \
+  college.hlab.CollegeApp -WebAPIBaseURL http://192.168.x.x:3000
 ```
 
 `http://` 通信は `NSAllowsLocalNetworking` でローカルネットワークにのみ許可している（本番の HTTPS には影響しない）。

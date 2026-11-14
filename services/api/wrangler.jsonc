@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "college-app-api",
+  "main": "presentation/worker.ts",
+  "compatibility_date": "2026-11-14",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "college-app",
+      // `wrangler d1 create college-app` を実行して得た database_id に差し替えること
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "infrastructure/db/migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      // 事前に `wrangler r2 bucket create college-app-media` を実行しておくこと
+      "bucket_name": "college-app-media"
+    }
+  ]
+}

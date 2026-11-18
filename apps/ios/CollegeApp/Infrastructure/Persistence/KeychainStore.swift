@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-/// Supabase セッションの保存先。Web 版の localStorage 相当だが、
+/// ログイン状態・トークンの保存先。Web 版の localStorage 相当だが、
 /// refresh_token を含むためキーチェーンに置く。
 enum KeychainStore {
     private static let service = "college.hlab.CollegeApp"

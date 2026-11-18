@@ -2,8 +2,8 @@ import Foundation
 
 /// モックモード用に `URLSession.shared` の通信を横取りし、`MockBackend` の応答を返す URLProtocol。
 ///
-/// Supabase（GoTrue / PostgREST）・Web 版 Next.js API・新バックエンド（services/api）の
-/// 3 つの接続先をまとめて引き受けるので、呼び出し側のコードはモックかどうかを意識しない。
+/// バックエンド（services/api）宛ての通信をすべて引き受けるので、
+/// 呼び出し側のコードはモックかどうかを意識しない。
 final class MockURLProtocol: URLProtocol {
     /// 起動時に一度だけ呼ぶ（`AppConfig.useMockAPI` が true のとき）
     static func install() {
@@ -11,7 +11,7 @@ final class MockURLProtocol: URLProtocol {
     }
 
     private static var mockedHosts: Set<String> {
-        Set([AppConfig.supabaseURL, AppConfig.webAPIBaseURL, AppConfig.collegeAPIBaseURL].compactMap(\.host))
+        Set([AppConfig.collegeAPIBaseURL].compactMap(\.host))
     }
 
     override class func canInit(with request: URLRequest) -> Bool {

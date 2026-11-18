@@ -11,7 +11,7 @@ struct LoginView: View {
                 .font(.system(size: 24, weight: .bold))
                 .foregroundStyle(Theme.textPrimary)
 
-            Text("ゆる募やプロフィール機能を使うには\nログインが必要です")
+            Text("\(AppConfig.allowedDomain) の Google アカウントで\nログインしてください")
                 .font(.system(size: 14))
                 .foregroundStyle(Theme.textSecondary)
                 .multilineTextAlignment(.center)

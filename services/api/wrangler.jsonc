@@ -4,19 +4,33 @@
   "main": "presentation/worker.ts",
   "compatibility_date": "2026-11-14",
   "compatibility_flags": ["nodejs_compat"],
+  // 公開 URL は https://college-app-api.whitepenguinmatsuo.workers.dev（iOS の AppConfig.defaultCollegeAPIBaseURL）
+  "workers_dev": true,
+  // バージョンごとのプレビュー URL は使わない（本番と同じ D1 を触るため）
+  "preview_urls": false,
+  // カレンダーの予定を GAS から取り直して D1 に入れる（presentation/scheduled.ts）
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "vars": {
+    "ALLOWED_EMAIL_DOMAIN": "hlab.college",
+    // Google Cloud で作った iOS 用 OAuth クライアント ID に差し替えること（apps/ios の AppConfig.googleClientID と同じ値）。
+    // iOS は Google に直接ログインし、そのとき得た access token を POST /auth/google に送る。
+    // GAS_WEBAPP_URL / GAS_POST_SECRET（共有カレンダーの読み書きを任せる GAS）はシークレットなので
+    // ここには書かず `wrangler secret put` で設定する
+    "GOOGLE_CLIENT_IDS": "627516720362-2ukviegfp03vf5jbuiu4avob88g48r23.apps.googleusercontent.com"
+  },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "college-app",
-      // `wrangler d1 create college-app` を実行して得た database_id に差し替えること
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      // `wrangler d1 create college-app` で作成済み
+      "database_id": "32e3c484-aac3-4b31-ad27-3273ba0bbc27",
       "migrations_dir": "infrastructure/db/migrations"
     }
   ],
   "r2_buckets": [
     {
       "binding": "MEDIA",
-      // 事前に `wrangler r2 bucket create college-app-media` を実行しておくこと
+      // `wrangler r2 bucket create college-app-media` で作成済み
       "bucket_name": "college-app-media"
     }
   ]

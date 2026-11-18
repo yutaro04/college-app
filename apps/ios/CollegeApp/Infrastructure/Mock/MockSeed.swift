@@ -6,13 +6,8 @@ enum MockSeed {
     static let myEmail = "taro.shimokita@hlab.college"
 
     /// 自動ログインに使うダミーセッション
-    static var session: SupabaseSession {
-        SupabaseSession(
-            accessToken: "mock-access-token",
-            refreshToken: "mock-refresh-token",
-            expiresAt: Date().addingTimeInterval(60 * 60 * 24 * 365),
-            user: SupabaseUser(id: myId, email: myEmail)
-        )
+    static var session: AuthSession {
+        AuthSession(user: SessionUser(id: myId, email: myEmail))
     }
 
     // MARK: - 図鑑
@@ -273,7 +268,23 @@ enum MockSeed {
         return state
     }
 
-    // MARK: - ひま（Supabase テーブル）
+    // MARK: - いまひま・カレンダー招待
+
+    struct HimaStatusRow {
+        let id: String
+        let residentId: String
+        let message: String
+        let expiresAt: Date
+        let createdAt: Date
+    }
+
+    struct HimaInviteRow {
+        let id: String
+        let statusId: String
+        let inviterId: String
+        let message: String
+        let createdAt: Date
+    }
 
     static let himaInviters: [(id: String, message: String)] = [
         ("res_011", "銭湯行きません？"),
@@ -281,33 +292,27 @@ enum MockSeed {
         ("res_002", "ラウンジでコーヒー飲もう"),
     ]
 
-    static func tables() -> [String: [[String: Any]]] {
+    static func himaStatuses() -> [HimaStatusRow] {
         [
-            "availability": [
-                availability("res_002", "ラウンジでコーヒー飲んでます", minutesAgo: 10, expiresInMinutes: 120),
-                availability("res_005", "夕飯一緒に作る人〜", minutesAgo: 30, expiresInMinutes: 180),
-                availability("res_010", "屋上で一杯どうですか", minutesAgo: 5, expiresInMinutes: 60),
-            ],
-            "availability_invites": [],
-            "invite_groups": [
-                ["id": "grp_001", "name": "3F のみんな", "emails": ["misaki.sato@hlab.college", "kenta.suzuki@hlab.college"],
-                 "created_at": iso(minutesAgo: 60 * 24 * 10)],
-            ],
-            "created_events": [],
+            hima("res_002", "ラウンジでコーヒー飲んでます", minutesAgo: 10, expiresInMinutes: 120),
+            hima("res_005", "夕飯一緒に作る人〜", minutesAgo: 30, expiresInMinutes: 180),
+            hima("res_010", "屋上で一杯どうですか", minutesAgo: 5, expiresInMinutes: 60),
         ]
     }
 
-    private static func availability(_ userId: String, _ message: String, minutesAgo: Int, expiresInMinutes: Int) -> [String: Any] {
-        [
-            "id": "avail_\(userId)",
-            "user_id": userId,
-            "message": message,
-            "expires_at": ISODate.string(from: Date().addingTimeInterval(TimeInterval(expiresInMinutes * 60))),
-            "created_at": iso(minutesAgo: minutesAgo),
-        ]
+    private static func hima(_ residentId: String, _ message: String, minutesAgo: Int, expiresInMinutes: Int) -> HimaStatusRow {
+        HimaStatusRow(
+            id: "hima_\(residentId)", residentId: residentId, message: message,
+            expiresAt: Date().addingTimeInterval(TimeInterval(expiresInMinutes * 60)),
+            createdAt: Date().addingTimeInterval(TimeInterval(-minutesAgo * 60))
+        )
     }
 
-    // MARK: - カレンダー（Web 版 Next.js API）
+    static let inviteGroups: [InviteGroup] = [
+        InviteGroup(id: "grp_001", name: "3F のみんな", emails: ["misaki.sato@hlab.college", "kenta.suzuki@hlab.college"]),
+    ]
+
+    // MARK: - カレンダー
 
     static let postConfig: [String: Any] = [
         "calendars": [

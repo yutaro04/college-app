@@ -1,10 +1,9 @@
 import Foundation
 import Observation
 
-/// Web 版 `useAvailability` の移植。
+/// いまひま（「今ひま」の表明と、それへの「誘う」）。新 API の `/hima-statuses` を使う。
 ///
-/// Web 版は Supabase Realtime + 30 秒ポーリングの二重構成だったが、
-/// iOS では WebSocket を持ち込まずポーリングに一本化している（新着検知のロジックは同じ）。
+/// 新着の誘いは 30 秒ごとのポーリングで検知する。
 @MainActor
 @Observable
 final class AvailabilityStore {
@@ -19,9 +18,6 @@ final class AvailabilityStore {
 
     private var pollTask: Task<Void, Never>?
     private var lastInviteID: String?
-
-    private let embeddedEntryColumns = "id,user_id,message,expires_at,created_at,profiles!availability_user_id_fkey(display_name)"
-    private let embeddedInviteColumns = "id,inviter_id,message,created_at,profiles!availability_invites_inviter_id_fkey(display_name)"
 
     // MARK: - ライフサイクル
 
@@ -57,16 +53,7 @@ final class AvailabilityStore {
     func fetchEntries() async {
         error = nil
         do {
-            let rows = try await DB.fetch(
-                "availability",
-                [
-                    DB.select(embeddedEntryColumns),
-                    DB.gt("expires_at", ISODate.string(from: Date())),
-                    DB.order("created_at", ascending: false),
-                ],
-                as: AvailabilityRow.self
-            )
-            entries = rows.map(\.entry)
+            entries = try await CollegeAPI.himaStatuses()
             myEntry = entries.first { $0.user_id == AuthStore.shared.user?.id }
         } catch {
             self.error = error.localizedDescription
@@ -75,19 +62,7 @@ final class AvailabilityStore {
     }
 
     private func fetchInvites(notifyNew: Bool) async {
-        guard let userId = AuthStore.shared.user?.id else { return }
-        guard let rows = try? await DB.fetch(
-            "availability_invites",
-            [
-                DB.select(embeddedInviteColumns),
-                DB.eq("availability_user_id", userId),
-                DB.order("created_at", ascending: false),
-                DB.limit(50),
-            ],
-            as: InviteRow.self
-        ) else { return }
-
-        let fetched = rows.map(\.invite)
+        guard AuthStore.shared.user != nil, let fetched = try? await CollegeAPI.himaInvites() else { return }
 
         // 前回の先頭より新しいものを新着とみなす（Web 版と同じ判定）
         if notifyNew, let previousTop = lastInviteID, fetched.first?.id != previousTop {
@@ -111,43 +86,22 @@ final class AvailabilityStore {
 
     // MARK: - 更新
 
-    /// 暇を表明する。既存の投稿は削除してから作り直す（cascade で紐づく誘いも消える）。
+    /// 暇を表明する。既存の表明は置き換わる（紐づく誘いも消える）
     func post(message: String, expiresAt: Date) async throws {
-        guard let userId = AuthStore.shared.user?.id else { return }
-        try await DB.delete("availability", [DB.eq("user_id", userId)])
-
-        struct NewEntry: Encodable {
-            let user_id: String
-            let message: String
-            let expires_at: String
-        }
-        try await DB.insert("availability", NewEntry(
-            user_id: userId,
-            message: message.trimmingCharacters(in: .whitespacesAndNewlines),
-            expires_at: ISODate.string(from: expiresAt)
-        ))
+        try await CollegeAPI.postHima(
+            message: message.trimmingCharacters(in: .whitespacesAndNewlines), expiresAt: expiresAt
+        )
         await fetchEntries()
     }
 
     func clear() async throws {
-        guard let userId = AuthStore.shared.user?.id else { return }
-        try await DB.delete("availability", [DB.eq("user_id", userId)])
+        try await CollegeAPI.clearHima()
         await fetchEntries()
     }
 
     func invite(_ target: AvailabilityEntry, message: String) async throws {
-        guard let userId = AuthStore.shared.user?.id else { return }
-        struct NewInvite: Encodable {
-            let availability_id: String
-            let availability_user_id: String
-            let inviter_id: String
-            let message: String
-        }
-        try await DB.insert("availability_invites", NewInvite(
-            availability_id: target.id,
-            availability_user_id: target.user_id,
-            inviter_id: userId,
-            message: message.trimmingCharacters(in: .whitespacesAndNewlines)
-        ))
+        try await CollegeAPI.inviteHima(
+            statusId: target.id, message: message.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
     }
 }

@@ -3,14 +3,53 @@ import Foundation
 /// 新バックエンド（`services/api`、Cloudflare Workers + Hono）のクライアント。
 /// エンドポイントは `services/api/README.md` の API 設計どおり。
 ///
-/// 実サーバーは未実装のため、現状はモックモード（`AppConfig.useMockAPI`）で
-/// `MockURLProtocol` が返すダミーデータを受け取る。
+/// モックモード（`AppConfig.useMockAPI`）では `MockURLProtocol` が返すダミーデータを受け取る。
 enum CollegeAPI {
     // MARK: - 認証
 
     struct Me: Decodable {
+        let email: String?
         let resident: Resident
     }
+
+    /// 新 API のセッショントークン（無期限）。キーチェーンに置き、全リクエストに Bearer で付ける
+    enum Session {
+        private static let key = "college.sessionToken"
+
+        static var token: String? {
+            KeychainStore.load(key: key).flatMap { String(data: $0, encoding: .utf8) }
+        }
+
+        static func save(_ token: String) { KeychainStore.save(Data(token.utf8), key: key) }
+        static func clear() { KeychainStore.delete(key: key) }
+    }
+
+    /// POST /auth/google — Google の access token を渡してセッションを発行してもらう。
+    /// hlab.college 以外のアカウントはサーバーが 403 で拒否する
+    static func signIn(googleAccessToken: String) async throws -> Me {
+        struct Body: Encodable { let accessToken: String }
+        struct Response: Decodable {
+            let token: String
+            let email: String?
+            let resident: Resident
+        }
+        let body: Response = try await send(
+            path: "/auth/google", method: "POST", json: Body(accessToken: googleAccessToken)
+        )
+        Session.save(body.token)
+        return Me(email: body.email, resident: body.resident)
+    }
+
+    /// POST /auth/logout — サーバー側のセッションを消してから手元のトークンを捨てる
+    static func signOut() async {
+        if Session.token != nil {
+            let _: Empty? = try? await send(path: "/auth/logout", method: "POST")
+        }
+        Session.clear()
+    }
+
+    /// 本文の無い応答（204）用
+    struct Empty: Decodable {}
 
     /// GET /auth/me
     static func me() async throws -> Me {
@@ -97,8 +136,7 @@ enum CollegeAPI {
 
     /// DELETE /residents/me/attributes/:attributeId
     static func removeMyAttribute(id: String) async throws {
-        struct Response: Decodable {}
-        let _: Response = try await send(path: "/residents/me/attributes/\(id)", method: "DELETE")
+        let _: Empty = try await send(path: "/residents/me/attributes/\(id)", method: "DELETE")
     }
 
     // MARK: - コーヒーチャット
@@ -155,6 +193,8 @@ enum CollegeAPI {
         var req = URLRequest(url: comps.url!)
         req.httpMethod = method
         req.timeoutInterval = 30
+        let token = Session.token
+        if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let json {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONEncoder().encode(json)
@@ -168,6 +208,11 @@ enum CollegeAPI {
         }
 
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        if status == 401, token != nil {
+            // サーバー側でセッションが消された（ログアウト・管理者による失効）のでログイン画面へ戻す
+            await AuthStore.shared.sessionRevoked()
+        }
+        if data.isEmpty, (200..<300).contains(status), let empty = Empty() as? T { return empty }
         guard (200..<300).contains(status) else {
             let message = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
             throw APIError.message(message ?? "通信に失敗しました (\(status))")
@@ -176,6 +221,15 @@ enum CollegeAPI {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
             throw APIError.message("サーバーから予期しない応答が返りました (\(status))")
+        }
+    }
+}
+
+enum APIError: LocalizedError {
+    case message(String)
+    var errorDescription: String? {
+        switch self {
+        case .message(let m): return m
         }
     }
 }

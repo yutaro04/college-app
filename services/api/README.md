@@ -10,12 +10,14 @@
 - **フレームワーク**: [Hono](https://hono.dev/)
 - **DB**: Cloudflare D1（SQLite 互換）
 - **ストレージ**: Cloudflare R2（写真・動画などのバイナリ本体。D1 にはオブジェクトキーだけ持つ）
-- **認証**: 自前セッション認証（Google OAuth + Cookie セッション。`users` / `sessions` テーブルで管理。Supabase Auth は使わない）
+- **認証**: 自前セッション認証（`users` / `sessions` テーブルで管理。Supabase Auth には依存しない）。
+  hlab.college の Google アカウントのみ許可し、セッションは無期限。詳細は下の「認証」
 - フロントエンドは Cloudflare Pages に分離（[`apps/web`](../../apps/web) 側で対応）
 
-Vercel + Supabase 構成からの移行であり、既存の iOS 版（[`apps/ios`](../../apps/ios)）が直接叩いている
-Supabase / 別リポジトリの Next.js API とは**別物**。既存機能（Calendar・ひま・Info・Settings）の
-移行計画は別途棚卸しする。
+Vercel + Supabase 構成からの移行。**Supabase は廃止済み**（データは引き継いでいない）。
+既存機能（いまひま・カレンダー招待・MY EVENT・イベント一覧・イベント作成）はすべてこの API に移した。
+別リポジトリの Next.js API とスプレッドシート（EventCache）は使わない。
+共有 Google カレンダーの読み書きは GAS（[`services/gas`](../gas)）に任せる。
 
 ## 背景・新機能
 
@@ -109,10 +111,25 @@ Android で同等機能を作る場合は `Media3 Transformer`（Jetpack）が A
 
 | Method | Path | 説明 |
 | --- | --- | --- |
-| GET | `/auth/google/start` | Google OAuth 開始（リダイレクト） |
-| GET | `/auth/google/callback` | コールバック。`users` / `residents` を find-or-create し、セッション Cookie を発行 |
-| POST | `/auth/logout` | セッション破棄 |
-| GET | `/auth/me` | ログイン中の `User` + `Resident` を返す |
+| POST | `/auth/google` | **実装済み**。ネイティブアプリ用。`{ accessToken }`（Google の access token）を検証し、`{ token, email, resident }` を返す。初回は `users` / `residents` を作成（表示名・アイコンは Google のもの）。許可ドメイン外は 403 |
+| GET | `/auth/google/start` | Web 版用。Google OAuth 開始（リダイレクト）。未実装 |
+| GET | `/auth/google/callback` | Web 版用。コールバックでセッション Cookie（`college_session`）を発行。未実装 |
+| POST | `/auth/logout` | **実装済み**。送ってきたセッションだけを破棄（204） |
+| GET | `/auth/me` | **実装済み**。ログイン中の `{ email, resident }`（属性込み）を返す |
+
+設計判断:
+
+- セッショントークンは `Authorization: Bearer <token>`（iOS）か Cookie `college_session`（Web）で送る。
+  要ログインのルートは `presentation/middleware/auth.ts` の `requireAuth` を通し、`c.get('auth')` で `userId` / `residentId` を得る
+- **ドメイン制限はサーバーで行う**。Google の `hd` クレームが `ALLOWED_EMAIL_DOMAIN`（`hlab.college`）と一致し、
+  メールが確認済みで同ドメインであること。ログイン URL の `hd` パラメータは画面の絞り込みにすぎず、改ざんできるので頼らない
+- access token は tokeninfo で `aud` が `GOOGLE_CLIENT_IDS` のどれかであることを確かめてから userinfo を読む
+  （他アプリ向けに発行されたトークンを持ち込まれるのを防ぐ）
+- **セッションは無期限**（`expires_at` が NULL）。トークンは 32 バイトの乱数で、DB には SHA-256 ハッシュだけを保存する。
+  失効させるには `/auth/logout`、または管理者が `sessions` の行を消す（退寮者などはユーザーごとに
+  `DELETE FROM sessions WHERE user_id = ?`）
+- iOS は Google に直接ログイン（iOS 用 OAuth クライアント・PKCE）し、得た access token をここに送る。
+  そのため `GOOGLE_CLIENT_IDS` には **iOS 用 OAuth クライアント ID** を入れる（Web 版を作るときは Web 用の ID をカンマ区切りで追加）
 
 ### カレッジ生図鑑（Residents）
 
@@ -120,7 +137,7 @@ Android で同等機能を作る場合は `Media3 Transformer`（Jetpack）が A
 | --- | --- | --- |
 | GET | `/residents` | 図鑑一覧。`?attributeId=`（複数可・OR）/ `?categoryKey=` / `?q=`（名前検索）/ `?cursor=` でページネーション |
 | GET | `/residents/:id` | 詳細（属性一覧込み） |
-| PATCH | `/residents/me` | 自分のプロフィール更新（`display_name` / `avatar_url` / `bio`） |
+| PATCH | `/residents/me` | **実装済み**。自分のプロフィール更新 `{ displayName?, bio? }`（表示名は 1〜40 文字、自己紹介は 500 文字まで） |
 | GET | `/residents/matches` | 要ログイン。自分と共有属性を持つ人を共有数の多い順に返す |
 
 ### 属性（Attributes）
@@ -204,8 +221,8 @@ PenPalThread（starter/partner + それぞれのペンネーム）──1:N─�
   候補の並び順は共通属性数（`/residents/matches` と同じ考え方）
 - **空き時間は本人が手で登録する**（`resident_free_slots`）。Google カレンダーの free/busy から自動生成する場合も
   このテーブルに書く想定（未実装）
-- **いま暇の「表明」は既存の Supabase `availability` のまま**。新設の `hima_gatherings` は
-  「この時間空いてるから誰か〇〇しよう」と時間指定で人を集めるもの。表明の D1 移行は既存機能の移行とまとめて行う
+- **いま暇の「表明」（`hima_statuses`）と、時間指定で人を集める `hima_gatherings` は別物**。
+  表明は「今ひま」を期限付きで出すだけ（1人1件・置き換え）。`hima_gatherings` は「この時間空いてるから誰か〇〇しよう」
 - **匿名文通の匿名性はサーバーで守る**。手紙を出すとサーバーが相手をランダムに選び、ペンネームを振る。
   レスポンスには `myAlias` / `partnerAlias` だけを返し、相手の resident id・表示名は**絶対に返さない**。
   嫌がらせ対策として「文通を終える」と運営への通報（`pen_pal_reports`）を用意（運営側の確認画面は別途）
@@ -260,9 +277,17 @@ api/
    └─ routes/          リソースごとの Hono サブルーター
 ```
 
-現状、実装済みなのは `GET /health` と `GET /attribute-categories`
-（D1 から読む最小の縦串。層のつなぎ方の参考実装）のみ。それ以外のエンドポイントは
-ルーティングだけ用意し、`501 Not Implemented` を返すスタブ（`presentation/routes/_notImplemented.ts`）。
+iOS アプリが使うエンドポイントはすべて実装済み（認証・図鑑・属性・コヒチャ・交流機能・既存機能）。
+**未実装（`501 Not Implemented` のスタブ。`presentation/routes/_notImplemented.ts`）は、写真（`/residents/:id/photos`・
+`/residents/me/photos`）・イベント動画（`/events/*`）・日記（`/daily-clips`）・Web 版ログイン（`/auth/google/start`・`/callback`）**。
+iOS の日記はクリップを端末内にだけ保存しているので、これらが無くても動く。
+
+実装済みの部分の、モックとの意図的な違い（iOS は影響を受けない）:
+- 他人のもの・存在しないものの削除は 404（モックは黙って 200）。削除の成功は 204
+- 入力の検証がモックより厳しい（文字数上限、おすすめの店の URL は http(s) のみ、空き時間は最大 7 日・ひま募集は最大 24 時間、
+  定員は 1〜100 など）
+- 文通の相手選びでは、今文通中の人に加え、通報があった文通の相手（どちらが通報したかは問わない）も選ばない（嫌がらせ対策）
+- 一覧には上限がある（図鑑 300 人、気になるの候補 50 人など）
 
 ## セットアップ
 
@@ -291,6 +316,40 @@ npm run dev
 npm run typecheck
 ```
 
+### 既存機能（旧 Supabase / Next.js から移したもの）
+
+テーブル定義: [`0005_hima_calendar.sql`](infrastructure/db/migrations/0005_hima_calendar.sql)・
+[`0006_calendar_cache.sql`](infrastructure/db/migrations/0006_calendar_cache.sql)。
+すべて**実装済み**・要ログイン。
+
+| Method | Path | 説明 |
+| --- | --- | --- |
+| GET | `/hima-statuses` | 期限内の「今ひま」表明（新しい順） |
+| PUT | `/hima-statuses/me` | `{ message, expiresAt }` 表明する。既存の表明とそれへの誘いは消える。期限は 24 時間以内 |
+| DELETE | `/hima-statuses/me` | 表明を取り下げる |
+| GET | `/hima-statuses/me/invites` | 自分の表明に届いた誘い（新しい順・最大 50 件。アプリは 30 秒ごとにポーリング） |
+| POST | `/hima-statuses/:id/invites` | `{ message }` 誘う。期限切れは 404、自分の表明には 400 |
+| GET | `/invite-directory` | カレンダー招待の候補（ログインしたことのある居住者の名前とメールアドレス） |
+| GET / POST | `/invite-groups` | 自分の招待グループ一覧 / `{ name, emails }` で作成 |
+| DELETE | `/invite-groups/:id` | 自分のグループだけ消せる（他人のものは 404） |
+| GET | `/calendar-events` | 共有カレンダーの予定 `{ events, lastSync }`（過去 30 日〜60 日先・開始日時順）。D1 のキャッシュを返す。一度も同期していなければその場で同期する |
+| GET | `/calendar-events/config` | 投稿先カレンダーと ROOM の選択肢 `{ config: { calendars, rooms } }`（末尾に「プライベート」を足す） |
+| POST | `/calendar-events` | Google カレンダーにイベントを作る（入力の検証規則は旧 Next.js と同じ）。`event` / `house` は GAS の Web アプリ経由（`GAS_WEBAPP_URL` / `GAS_POST_SECRET` が必要）。`private` は本文の `googleAccessToken`（アプリが持つ本人のトークン）で本人の primary カレンダーに直接作る。共有カレンダーに作った予定はその場で D1 にも入れる（次の同期を待たずに一覧に出る） |
+| GET | `/calendar-events/mine` | 自分が作ったイベントの ID（Calendar の MY EVENT 用） |
+
+設計判断:
+
+- **サーバーは Google の refresh token を預からない**（旧構成の `google_oauth_tokens` は廃止）。
+  プライベートカレンダーへの投稿は、アプリが端末に持つ本人の access token をその都度受け取って使う
+- **カレンダーの予定は D1 にキャッシュする**（旧 EventCache スプレッドシートの置き換え）。Cron Trigger
+  （`wrangler.jsonc` の `triggers.crons`、15 分ごと。`presentation/scheduled.ts`）が GAS から過去 30 日〜60 日先の予定を取り、
+  `calendar_events` の「開始が範囲の終わりより前」の行を丸ごと入れ替える（カレンダーから消えた予定も消える）。
+  同期に失敗しても D1 は前回の内容のまま（batch は 1 トランザクション）。GAS は 1 回数秒かかるので一覧表示のたびには呼ばない
+- 繰り返し予定は回ごとに同じイベント ID で現れるので、`calendar_events` の主キーは `(event_id, start_iso)`
+- GAS のシークレットは `wrangler secret put GAS_WEBAPP_URL` / `wrangler secret put GAS_POST_SECRET` で設定する。
+  `GAS_POST_SECRET` は GAS のスクリプト プロパティ `POST_SECRET` と同じ値
+- ローカルで同期を試すとき: `wrangler dev --test-scheduled` で起動し、`curl localhost:8787/__scheduled`
+
 ## TODO
 
 - [x] 技術スタックの確定（Cloudflare Workers + Hono + D1 + R2 + 自前セッション認証）
@@ -302,8 +361,13 @@ npm run typecheck
 - [x] Hono プロジェクト雛形の作成（`wrangler.jsonc`, `package.json`, D1/R2 bindings, ルート一式）
 - [x] 交流機能（おすすめの店・気になる・誘って・空き時間・ひま募集・匿名文通）のテーブル定義・API 設計・ルートのスタブ
 - [x] 日記（日常用 daily_clips / イベント用との分離）のテーブル定義・API 設計・スタブ
-- [ ] D1 データベース / R2 バケットの実作成（`wrangler d1 create` / `wrangler r2 bucket create`。要 Cloudflare アカウント認証）
-- [ ] 各エンドポイントの実装（現状 `/health` と `/attribute-categories` 以外は 501 スタブ）
-- [ ] 自前セッション認証（Google OAuth + Cookie セッション）の実装
-- [ ] 既存 Next.js API（`/api/events`, `/api/events/config`, `/api/events/create`,
-      `/api/auth/google-token`）の棚卸しと、このAPIへの移植計画
+- [x] D1 データベースの実作成
+- [x] R2 バケットの実作成
+- [x] デプロイ（https://college-app-api.whitepenguinmatsuo.workers.dev。マイグレーション 0001〜0006 適用済み）
+- [ ] GAS のシークレット登録（`GAS_WEBAPP_URL` / `GAS_POST_SECRET`）と GAS（`services/gas`）の差し替え
+- [x] 図鑑・属性・コヒチャ・交流機能のエンドポイントの実装
+- [ ] 写真・イベント動画・日記のアップロード（R2）のエンドポイントの実装
+- [x] 自前セッション認証（ネイティブアプリ用 `POST /auth/google`・ログアウト・`/auth/me`・`requireAuth`）
+- [ ] Web 版用の Cookie ログイン（`/auth/google/start`・`/auth/google/callback`）
+- [x] 旧 Supabase の既存機能（いまひま・招待グループ・MY EVENT）と、Next.js の `/api/events*` の移植
+- [x] スプレッドシートの廃止（予定は Cron で GAS から取って D1 にキャッシュ）

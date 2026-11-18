@@ -54,9 +54,8 @@ final class MyCreatedEventsStore {
             ids = []
             return
         }
-        struct Row: Decodable { let event_id: String }
-        let rows = try? await DB.fetch("created_events", [DB.select("event_id")], as: Row.self)
-        ids = Set((rows ?? []).map(\.event_id))
+        let eventIds = try? await CollegeAPI.myCalendarEventIds()
+        ids = Set(eventIds ?? [])
     }
 
     func add(_ id: String) { ids.insert(id) }

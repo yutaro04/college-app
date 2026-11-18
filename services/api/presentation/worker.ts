@@ -14,6 +14,10 @@ import { freeSlotsRoute } from './routes/freeSlots'
 import { himaGatheringsRoute } from './routes/himaGatherings'
 import { penPalsRoute } from './routes/penPals'
 import { dailyClipsRoute } from './routes/dailyClips'
+import { himaStatusesRoute } from './routes/himaStatuses'
+import { inviteDirectoryRoute, inviteGroupsRoute } from './routes/inviteGroups'
+import { calendarEventsRoute } from './routes/calendarEvents'
+import { scheduled } from './scheduled'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -31,5 +35,12 @@ app.route('/free-slots', freeSlotsRoute)
 app.route('/hima-gatherings', himaGatheringsRoute)
 app.route('/pen-pals', penPalsRoute)
 app.route('/daily-clips', dailyClipsRoute)
+app.route('/hima-statuses', himaStatusesRoute)
+app.route('/invite-groups', inviteGroupsRoute)
+app.route('/invite-directory', inviteDirectoryRoute)
+app.route('/calendar-events', calendarEventsRoute)
 
-export default app
+export default {
+  fetch: app.fetch,
+  scheduled,
+} satisfies ExportedHandler<Env>

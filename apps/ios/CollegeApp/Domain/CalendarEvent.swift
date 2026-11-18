@@ -1,7 +1,7 @@
 import Foundation
 
 /// Web 版 `src/lib/types.ts` の CalendarEvent をそのまま移植。
-/// 値は EventCache スプレッドシート由来の文字列なので、型もできるだけ原文に合わせている。
+/// 値は GAS（Google カレンダー）由来の文字列なので、型もできるだけ原文に合わせている。
 struct CalendarEvent: Codable, Identifiable, Hashable {
     var id: String
     var calendarName: String

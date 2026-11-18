@@ -1,29 +1,36 @@
 import Foundation
 import Observation
 
-/// Web 版 `useAuth` の移植。セッション・プロフィール・ログイン状態を一元管理する。
+/// ログイン状態・プロフィールを一元管理する。
+///
+/// ログインは hlab.college の Google アカウントで 1 回だけ行う:
+/// 1. アプリが Google に直接ログインし（`GoogleAuth`）、access token / refresh token を得る
+/// 2. access token を新 API の `POST /auth/google` に送る。サーバーが本人確認・ドメイン判定をして
+///    無期限のセッショントークンを返す（`CollegeAPI.Session`）
+/// どちらもキーチェーンに置き、明示的にログアウトするまで残す。以後ログイン画面は出ない。
+/// Google のトークンはプライベートカレンダーへの投稿にだけ使う。
 @MainActor
 @Observable
 final class AuthStore {
     static let shared = AuthStore()
 
-    private static let sessionKey = "supabase.session"
+    private static let sessionKey = "college.authSession"
+    private static let googleTokensKey = "google.tokens"
 
-    private(set) var session: SupabaseSession?
+    private(set) var session: AuthSession?
     private(set) var profile: Profile?
     private(set) var loading = true
     var authError: String?
 
-    var user: SupabaseUser? { session?.user }
+    var user: SessionUser? { session?.user }
     var isSignedIn: Bool { session != nil }
 
-    private var refreshTask: Task<SupabaseSession?, Error>?
+    private var googleRefreshTask: Task<GoogleAuth.Tokens, Error>?
 
     private init() {}
 
     // MARK: - 起動時復元
 
-    /// キーチェーンのセッションを復元する。失効していればローカルをクリアして未ログインに戻す。
     func restore() async {
         defer { loading = false }
 
@@ -34,22 +41,16 @@ final class AuthStore {
             return
         }
 
-        guard let data = KeychainStore.load(key: Self.sessionKey),
-              let stored = try? JSONDecoder().decode(SupabaseSession.self, from: data)
+        // Supabase 時代のセッションが残っていれば捨てる（Supabase は廃止済み）
+        KeychainStore.delete(key: "supabase.session")
+
+        guard CollegeAPI.Session.token != nil,
+              let data = KeychainStore.load(key: Self.sessionKey),
+              let stored = try? JSONDecoder().decode(AuthSession.self, from: data)
         else { return }
 
-        guard SupabaseAuth.isAllowed(email: stored.user.email) else {
-            clearLocalSession()
-            authError = "\(AppConfig.allowedDomain) のアカウントでログインしてください"
-            return
-        }
-
+        // オフラインでもログイン状態は保つ。サーバーがセッションを消していた場合は 401 → sessionRevoked で戻る
         session = stored
-        // リフレッシュトークンが失効している場合はここで弾かれるので未ログインに戻す
-        guard (try? await accessToken()) != nil else {
-            clearLocalSession()
-            return
-        }
         await fetchProfile()
     }
 
@@ -63,10 +64,18 @@ final class AuthStore {
             return
         }
         do {
-            let newSession = try await SupabaseAuth.signInWithGoogle()
-            persist(newSession)
-            await fetchProfile()
-            await saveGoogleRefreshToken()
+            let tokens = try await GoogleAuth.signIn()
+            let me: CollegeAPI.Me
+            do {
+                me = try await CollegeAPI.signIn(googleAccessToken: tokens.accessToken)
+            } catch {
+                // 許可外ドメインなどで断られたら、Google 側の許可も残さない
+                await GoogleAuth.revoke(tokens.refreshToken ?? tokens.accessToken)
+                throw error
+            }
+            saveGoogleTokens(tokens)
+            persist(AuthSession(user: SessionUser(id: me.resident.id, email: me.email)))
+            profile = Profile(me.resident)
         } catch AuthError.cancelled {
             // ユーザー自身のキャンセルなのでエラー表示はしない
         } catch {
@@ -75,93 +84,95 @@ final class AuthStore {
     }
 
     func signOut() async {
-        if let token = session?.accessToken {
-            try? await SupabaseAuth.signOut(accessToken: token)
+        await CollegeAPI.signOut()
+        if let tokens = loadGoogleTokens() {
+            await GoogleAuth.revoke(tokens.refreshToken ?? tokens.accessToken)
         }
         clearLocalSession()
+    }
+
+    /// 新 API が 401 を返した（サーバー側でセッションが消された）ときに呼ばれる。ログイン画面へ戻す
+    func sessionRevoked() async {
+        guard !AppConfig.useMockAPI, session != nil else { return }
+        clearLocalSession()
+        authError = "ログインの有効期限が切れました。もう一度ログインしてください"
     }
 
     private func clearLocalSession() {
         session = nil
         profile = nil
-        refreshTask = nil
+        googleRefreshTask = nil
+        CollegeAPI.Session.clear()
         KeychainStore.delete(key: Self.sessionKey)
+        KeychainStore.delete(key: Self.googleTokensKey)
     }
 
-    private func persist(_ newSession: SupabaseSession) {
-        // リフレッシュ時は provider_refresh_token が返らないので、既存の値を引き継ぐ
-        var merged = newSession
-        if merged.providerRefreshToken == nil { merged.providerRefreshToken = session?.providerRefreshToken }
-        session = merged
-        if let data = try? JSONEncoder().encode(merged) {
+    private func persist(_ newSession: AuthSession) {
+        session = newSession
+        if let data = try? JSONEncoder().encode(newSession) {
             KeychainStore.save(data, key: Self.sessionKey)
         }
     }
 
-    // MARK: - アクセストークン
+    // MARK: - Google の access token（プライベートカレンダー投稿用）
 
-    /// 有効なアクセストークンを返す。期限切れならリフレッシュする。
-    /// 同時に複数のリクエストが来てもリフレッシュは 1 回にまとめる。
-    func accessToken() async throws -> String? {
-        guard let current = session else { return nil }
+    /// 有効な Google の access token を返す。期限切れなら refresh token で更新する（同時呼び出しは 1 回にまとめる）
+    func googleAccessToken() async throws -> String {
+        guard let current = loadGoogleTokens() else {
+            throw APIError.message("Googleカレンダーとの連携が必要です。一度ログアウトして再ログインしてください")
+        }
         guard current.isExpired else { return current.accessToken }
 
-        if let task = refreshTask {
-            return try await task.value?.accessToken
+        if let task = googleRefreshTask {
+            return try await task.value.accessToken
         }
-
-        let task = Task<SupabaseSession?, Error> { [refreshToken = current.refreshToken] in
-            try await SupabaseAuth.refresh(refreshToken: refreshToken)
+        guard let refreshToken = current.refreshToken else {
+            throw APIError.message("Googleカレンダーとの連携が必要です。一度ログアウトして再ログインしてください")
         }
-        refreshTask = task
-        defer { refreshTask = nil }
+        let task = Task { try await GoogleAuth.refresh(refreshToken) }
+        googleRefreshTask = task
+        defer { googleRefreshTask = nil }
 
         do {
-            guard let refreshed = try await task.value else { return nil }
-            persist(refreshed)
+            let refreshed = try await task.value
+            saveGoogleTokens(refreshed)
             return refreshed.accessToken
         } catch {
-            // Invalid Refresh Token など: 古いセッションを捨てて未ログインに戻す
-            clearLocalSession()
-            return nil
+            throw APIError.message("Googleカレンダーとの連携が切れました。一度ログアウトして再ログインしてください")
+        }
+    }
+
+    private func loadGoogleTokens() -> GoogleAuth.Tokens? {
+        KeychainStore.load(key: Self.googleTokensKey).flatMap { try? JSONDecoder().decode(GoogleAuth.Tokens.self, from: $0) }
+    }
+
+    private func saveGoogleTokens(_ tokens: GoogleAuth.Tokens) {
+        if let data = try? JSONEncoder().encode(tokens) {
+            KeychainStore.save(data, key: Self.googleTokensKey)
         }
     }
 
     // MARK: - プロフィール
 
     func fetchProfile() async {
-        guard let userId = session?.user.id else { return }
-        let rows = try? await DB.fetch(
-            "profiles",
-            [DB.select("id,display_name,avatar_url"), DB.eq("id", userId), DB.limit(1)],
-            as: Profile.self
-        )
-        if let first = rows?.first { profile = first }
+        guard session != nil, let me = try? await CollegeAPI.me() else { return }
+        profile = Profile(me.resident)
+        if let email = me.email, session?.user.email != email {
+            session?.user.email = email
+            if let session { persist(session) }
+        }
     }
 
     func updateDisplayName(_ name: String) async throws {
-        guard let userId = session?.user.id else { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-
-        struct Patch: Encodable {
-            let display_name: String
-            let updated_at: String
-        }
-        try await DB.update(
-            "profiles",
-            Patch(display_name: trimmed, updated_at: ISODate.string(from: Date())),
-            [DB.eq("id", userId)]
-        )
-        profile?.display_name = trimmed
+        let resident = try await CollegeAPI.updateMe(displayName: trimmed, bio: nil)
+        profile = Profile(resident)
     }
+}
 
-    // MARK: - Google refresh_token のサーバー保存
-
-    /// 「プライベート」カレンダー投稿用に、Google の refresh_token を Web 版のサーバーへ預ける。
-    /// 失敗してもログイン自体は継続する（プライベート投稿時にだけエラーになる）。
-    private func saveGoogleRefreshToken() async {
-        guard let session, let providerRefreshToken = session.providerRefreshToken else { return }
-        try? await WebAPI.saveGoogleRefreshToken(providerRefreshToken, accessToken: session.accessToken)
+private extension Profile {
+    init(_ resident: Resident) {
+        self.init(id: resident.id, display_name: resident.displayName, avatar_url: resident.avatarUrl)
     }
 }

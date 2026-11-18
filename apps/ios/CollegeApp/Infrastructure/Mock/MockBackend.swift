@@ -3,7 +3,7 @@ import Foundation
 /// モックモードのインメモリ「サーバー」。
 ///
 /// 状態はアプリ起動中だけメモリに保持する（再起動すると `MockSeed` の初期データに戻る）。
-/// レスポンスの形は Supabase PostgREST・Web 版 Next.js API・`services/api/README.md` の API 設計に合わせている。
+/// レスポンスの形は `services/api` の実装（未実装分は README の API 設計）に合わせている。
 final class MockBackend: @unchecked Sendable {
     static let shared = MockBackend()
 
@@ -28,15 +28,19 @@ final class MockBackend: @unchecked Sendable {
     var residents: [ResidentRow] = []
     private var coffeeChats: [CoffeeChatRequest] = []
     private var events: [CalendarEvent]
-    /// PostgREST のテーブル（availability / availability_invites / invite_groups / created_events）
-    private var tables: [String: [[String: Any]]]
+    /// いまひま・カレンダー招待・MY EVENT（`/hima-statuses` `/invite-groups` `/calendar-events`）
+    private var himaStatuses: [MockSeed.HimaStatusRow]
+    private var himaInvites: [MockSeed.HimaInviteRow] = []
+    private var inviteGroups: [InviteGroup]
+    private var createdEventIds: [String] = []
     /// 交流機能の状態（`MockBackend+Social.swift`）
     var social = MockSocialState()
 
     private init() {
         categories = MockSeed.categories
         events = MockSeed.events()
-        tables = MockSeed.tables()
+        himaStatuses = MockSeed.himaStatuses()
+        inviteGroups = MockSeed.inviteGroups
         for seed in MockSeed.residents {
             let ids = seed.attributes.map { findOrCreateAttribute(categoryKey: $0.0, value: $0.1).id }
             residents.append(ResidentRow(
@@ -67,16 +71,6 @@ final class MockBackend: @unchecked Sendable {
         let query = comps?.queryItems ?? []
         let segments = url.path.split(separator: "/").map(String.init)
 
-        if url.host == AppConfig.supabaseURL.host {
-            if segments.first == "auth" { return json([String: String]()) }
-            if segments.count >= 3, segments[0] == "rest" {
-                return postgrest(method: method, table: segments[2], query: query, body: body)
-            }
-            return notFound()
-        }
-        if segments.first == "api" {
-            return nextAPI(method: method, path: segments, body: body)
-        }
         return collegeAPI(method: method, path: segments, query: query, body: body)
     }
 
@@ -91,7 +85,7 @@ final class MockBackend: @unchecked Sendable {
             return json(["ok": true])
 
         case ("GET", "auth/me"), ("GET", "residents/me"):
-            return encode(["resident": resident(myId)!])
+            return encode(MeResponse(email: MockSeed.myEmail, resident: resident(myId)!))
 
         case ("GET", "attribute-categories"):
             return encode(["categories": categories])
@@ -205,6 +199,7 @@ final class MockBackend: @unchecked Sendable {
             return encode(["request": coffeeChats[index]])
 
         default:
+            if let reply = legacyAPI(method: method, route: route, param: param, input: input) { return reply }
             return socialAPI(method: method, path: path, query: query, input: input)
         }
     }
@@ -215,6 +210,9 @@ final class MockBackend: @unchecked Sendable {
         "residents", "residents/matches", "residents/me",
         "residents/me/attributes", "residents/me/attributes/:id", "residents/:id",
         "coffee-chat-requests", "coffee-chat-requests/:id",
+        "hima-statuses", "hima-statuses/me", "hima-statuses/me/invites", "hima-statuses/:id/invites",
+        "invite-groups", "invite-groups/:id", "invite-directory",
+        "calendar-events", "calendar-events/config", "calendar-events/mine",
     ]
 
     /// パスをルート定義に照合し、(ルート, `:id` の値) を返す
@@ -269,20 +267,86 @@ final class MockBackend: @unchecked Sendable {
         return created
     }
 
-    // MARK: - Web 版 Next.js API（/api/*）
+    private struct MeResponse: Encodable {
+        let email: String
+        let resident: Resident
+    }
 
-    private func nextAPI(method: String, path: [String], body: Data?) -> Reply {
-        switch (method, path) {
-        case ("GET", ["api", "events"]):
-            return encode(EventsResponse(success: true, events: events))
+    // MARK: - いまひま・カレンダー招待・カレンダー（旧 Supabase / Next.js）
 
-        case ("GET", ["api", "events", "config"]):
-            return json(["success": true, "config": MockSeed.postConfig])
+    private func legacyAPI(method: String, route: String, param: String?, input: [String: Any]) -> Reply? {
+        switch (method, route) {
+        case ("GET", "hima-statuses"):
+            let now = Date()
+            let statuses = himaStatuses.filter { $0.expiresAt > now }
+                .sorted { $0.createdAt > $1.createdAt }
+                .compactMap(himaStatusJSON)
+            return json(["statuses": statuses])
 
-        case ("POST", ["api", "events", "create"]):
-            guard let body, let input = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
-                return json(["success": false, "error": "入力が不正です"])
+        case ("PUT", "hima-statuses/me"):
+            guard let expires = ISODate.parse(input["expiresAt"] as? String ?? ""), expires > Date() else {
+                return error(400, "期限が不正です")
             }
+            clearMyHima()
+            let row = MockSeed.HimaStatusRow(
+                id: UUID().uuidString.lowercased(), residentId: myId,
+                message: input["message"] as? String ?? "", expiresAt: expires, createdAt: Date()
+            )
+            himaStatuses.append(row)
+            scheduleInviteForMe(statusId: row.id)
+            return json(["status": himaStatusJSON(row) ?? [:]])
+
+        case ("DELETE", "hima-statuses/me"):
+            clearMyHima()
+            return Reply(status: 204, data: Data())
+
+        case ("GET", "hima-statuses/me/invites"):
+            let mine = Set(himaStatuses.filter { $0.residentId == myId }.map(\.id))
+            let invites = himaInvites.filter { mine.contains($0.statusId) }
+                .sorted { $0.createdAt > $1.createdAt }
+                .prefix(50)
+                .compactMap { invite -> [String: Any]? in
+                    guard let inviter = ref(invite.inviterId) else { return nil }
+                    return [
+                        "id": invite.id, "inviter": refJSON(inviter), "message": invite.message,
+                        "createdAt": ISODate.string(from: invite.createdAt),
+                    ]
+                }
+            return json(["invites": Array(invites)])
+
+        case ("POST", "hima-statuses/:id/invites"):
+            guard let status = himaStatuses.first(where: { $0.id == param && $0.expiresAt > Date() }) else {
+                return error(404, "この「ひま」はもう終わっています")
+            }
+            guard status.residentId != myId else { return error(400, "自分には誘えません") }
+            let invite = MockSeed.HimaInviteRow(
+                id: UUID().uuidString.lowercased(), statusId: status.id, inviterId: myId,
+                message: input["message"] as? String ?? "", createdAt: Date()
+            )
+            himaInvites.append(invite)
+            return json(["invite": ["id": invite.id]], status: 201)
+
+        case ("GET", "invite-directory"):
+            let users = residents.map { ["id": $0.id, "displayName": $0.displayName, "email": $0.email] }
+            return json(["users": users])
+
+        case ("GET", "invite-groups"):
+            return encode(["groups": inviteGroups])
+
+        case ("POST", "invite-groups"):
+            let group = InviteGroup(
+                id: UUID().uuidString.lowercased(),
+                name: input["name"] as? String ?? "",
+                emails: input["emails"] as? [String] ?? []
+            )
+            inviteGroups.append(group)
+            return encode(["group": group], status: 201)
+
+        case ("DELETE", "invite-groups/:id"):
+            inviteGroups.removeAll { $0.id == param }
+            return Reply(status: 204, data: Data())
+
+        case ("POST", "calendar-events"):
             let dateKey = input["dateKey"] as? String ?? DateUtil.dateKey(Date())
             let startISO = input["startISO"] as? String ?? ""
             let endISO = input["endISO"] as? String ?? ""
@@ -296,130 +360,60 @@ final class MockBackend: @unchecked Sendable {
                 startISO: startISO, endISO: endISO, dateKey: dateKey,
                 startTime: MockSeed.hhmm(startISO), endTime: MockSeed.hhmm(endISO),
                 displayDate: MockSeed.displayDate(dateKey),
-                isAllDay: input["isAllDay"] as? Bool ?? false, color: "#CB1B3B"
+                isAllDay: input["isAllDay"] as? Bool ?? false,
+                color: calendarKey == "private" ? "#4285F4" : "#CB1B3B"
             )
             events.append(event)
-            tables["created_events", default: []].append(["event_id": event.id, "user_id": myId])
-            return encode(EventResponse(success: true, event: event))
+            createdEventIds.append(event.id)
+            return encode(["event": event], status: 201)
 
-        case ("POST", ["api", "auth", "google-token"]):
-            return json(["success": true])
+        case ("GET", "calendar-events"):
+            return encode(["events": events.sorted { $0.startISO < $1.startISO }])
 
-        default:
-            return notFound()
-        }
-    }
+        case ("GET", "calendar-events/config"):
+            return json(["config": MockSeed.postConfig])
 
-    private struct EventsResponse: Encodable {
-        let success: Bool
-        let events: [CalendarEvent]
-    }
-
-    private struct EventResponse: Encodable {
-        let success: Bool
-        let event: CalendarEvent
-    }
-
-    // MARK: - Supabase PostgREST（/rest/v1/:table）
-
-    private func postgrest(method: String, table: String, query: [URLQueryItem], body: Data?) -> Reply {
-        let filters = query.compactMap { item -> (String, String)? in
-            guard let value = item.value, value.hasPrefix("eq.") else { return nil }
-            return (item.name, String(value.dropFirst(3)))
-        }
-        let matches: ([String: Any]) -> Bool = { row in
-            filters.allSatisfy { key, value in "\(row[key] ?? "")" == value }
-        }
-
-        // profiles は図鑑の居住者から組み立てる
-        if table == "profiles" {
-            if method == "PATCH", let name = Self.object(body)?["display_name"] as? String {
-                for index in residents.indices where matches(["id": residents[index].id]) {
-                    residents[index].displayName = name
-                }
-                return json([String]())
-            }
-            let rows: [[String: Any]] = residents.map {
-                ["id": $0.id, "display_name": $0.displayName, "avatar_url": NSNull(), "email": $0.email]
-            }
-            return json(rows.filter(matches))
-        }
-
-        switch method {
-        case "GET":
-            var rows = (tables[table] ?? []).filter(matches)
-            if table == "availability" {
-                rows = rows.filter { (ISODate.parse($0["expires_at"] as? String ?? "") ?? .distantPast) > Date() }
-            }
-            rows.sort { ($0["created_at"] as? String ?? "") > ($1["created_at"] as? String ?? "") }
-            if let limit = query.value("limit").flatMap(Int.init) { rows = Array(rows.prefix(limit)) }
-            if query.value("select")?.contains("profiles!") == true {
-                let ownerKey = table == "availability_invites" ? "inviter_id" : "user_id"
-                rows = rows.map { row in
-                    var copy = row
-                    let name = residents.first { $0.id == row[ownerKey] as? String }?.displayName
-                    copy["profiles"] = ["display_name": name ?? "名無し"]
-                    return copy
-                }
-            }
-            return json(rows)
-
-        case "POST":
-            guard var row = Self.object(body) else { return error(400, "invalid body") }
-            row["id"] = row["id"] ?? UUID().uuidString.lowercased()
-            row["created_at"] = row["created_at"] ?? ISODate.string(from: Date())
-            if table == "invite_groups" { row.removeValue(forKey: "owner_id") }
-            tables[table, default: []].append(row)
-            if table == "availability", row["user_id"] as? String == myId {
-                scheduleInviteForMe(availabilityId: row["id"] as? String ?? "")
-            }
-            return json([row], status: 201)
-
-        case "PATCH":
-            guard let patch = Self.object(body) else { return error(400, "invalid body") }
-            tables[table] = (tables[table] ?? []).map { row in
-                matches(row) ? row.merging(patch) { _, new in new } : row
-            }
-            return json([String]())
-
-        case "DELETE":
-            tables[table] = (tables[table] ?? []).filter { !matches($0) }
-            if table == "availability" {
-                let alive = Set((tables["availability"] ?? []).compactMap { $0["id"] as? String })
-                tables["availability_invites"] = (tables["availability_invites"] ?? []).filter {
-                    alive.contains($0["availability_id"] as? String ?? "")
-                }
-            }
-            return json([String]())
+        case ("GET", "calendar-events/mine"):
+            return json(["eventIds": createdEventIds])
 
         default:
-            return notFound()
+            return nil
         }
+    }
+
+    private func himaStatusJSON(_ row: MockSeed.HimaStatusRow) -> [String: Any]? {
+        guard let resident = ref(row.residentId) else { return nil }
+        return [
+            "id": row.id, "resident": refJSON(resident), "message": row.message,
+            "expiresAt": ISODate.string(from: row.expiresAt), "createdAt": ISODate.string(from: row.createdAt),
+        ]
+    }
+
+    private func refJSON(_ ref: ResidentRef) -> [String: Any] {
+        ["id": ref.id, "displayName": ref.displayName, "avatarUrl": ref.avatarUrl ?? NSNull()]
+    }
+
+    /// 自分の表明と、それへの誘いを消す（サーバーの ON DELETE CASCADE 相当）
+    private func clearMyHima() {
+        let mine = Set(himaStatuses.filter { $0.residentId == myId }.map(\.id))
+        himaStatuses.removeAll { mine.contains($0.id) }
+        himaInvites.removeAll { mine.contains($0.statusId) }
     }
 
     /// 自分が「ひま」を表明したら、少し後に誰かから誘いが届いたことにする
     /// （ポーリングで新着として検知され、トースト + ローカル通知が出る）
-    private func scheduleInviteForMe(availabilityId: String) {
+    private func scheduleInviteForMe(statusId: String) {
         DispatchQueue.global().asyncAfter(deadline: .now() + 10) { [weak self] in
             guard let self else { return }
             lock.lock()
             defer { lock.unlock() }
+            guard himaStatuses.contains(where: { $0.id == statusId }) else { return }
             let inviter = MockSeed.himaInviters.randomElement()!
-            tables["availability_invites", default: []].append([
-                "id": UUID().uuidString.lowercased(),
-                "availability_id": availabilityId,
-                "availability_user_id": myId,
-                "inviter_id": inviter.id,
-                "message": inviter.message,
-                "created_at": ISODate.string(from: Date()),
-            ])
+            himaInvites.append(MockSeed.HimaInviteRow(
+                id: UUID().uuidString.lowercased(), statusId: statusId, inviterId: inviter.id,
+                message: inviter.message, createdAt: Date()
+            ))
         }
-    }
-
-    private static func object(_ body: Data?) -> [String: Any]? {
-        guard let body, let value = try? JSONSerialization.jsonObject(with: body) else { return nil }
-        if let dict = value as? [String: Any] { return dict }
-        return (value as? [[String: Any]])?.first
     }
 
     // MARK: - レスポンス生成

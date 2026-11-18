@@ -5,38 +5,37 @@ import Observation
 @MainActor
 @Observable
 final class AddEventStore {
-    private(set) var config: WebAPI.PostConfig?
+    private(set) var config: CollegeAPI.PostConfig?
     private(set) var configError: String?
     private(set) var submitting = false
 
     /// GAS から設定を取れなかった場合のフォールバック（Web 版と同じ既定値）
-    static let fallbackCalendars: [WebAPI.CalendarOption] = [
+    static let fallbackCalendars: [CollegeAPI.CalendarOption] = [
         .init(key: "event", name: "000_イベントカレンダー"),
         .init(key: "house", name: "001_ハウス/委員会"),
         .init(key: "private", name: "プライベート"),
     ]
 
-    var calendars: [WebAPI.CalendarOption] { config?.calendars ?? Self.fallbackCalendars }
-    var rooms: [WebAPI.RoomOption] { config?.rooms ?? [] }
+    var calendars: [CollegeAPI.CalendarOption] { config?.calendars ?? Self.fallbackCalendars }
+    var rooms: [CollegeAPI.RoomOption] { config?.rooms ?? [] }
 
     func loadConfig() async {
         guard config == nil else { return }
         do {
-            config = try await WebAPI.fetchPostConfig()
+            config = try await CollegeAPI.calendarPostConfig()
             configError = nil
         } catch {
             configError = error.localizedDescription
         }
     }
 
-    func createEvent(_ input: WebAPI.CreateEventInput) async throws -> CalendarEvent {
+    func createEvent(_ input: CollegeAPI.CalendarEventInput) async throws -> CalendarEvent {
         submitting = true
         defer { submitting = false }
 
-        guard let token = try await AuthStore.shared.accessToken() else {
-            throw APIError.message("ログインが必要です")
-        }
-        return try await WebAPI.createEvent(input, accessToken: token)
+        // プライベートは本人の Google カレンダーに作るので、本人の Google access token を渡す
+        let googleToken = input.calendarKey == "private" ? try await AuthStore.shared.googleAccessToken() : nil
+        return try await CollegeAPI.createCalendarEvent(input, googleAccessToken: googleToken)
     }
 }
 
@@ -48,37 +47,19 @@ final class InvitePickerStore {
     private(set) var groups: [InviteGroup] = []
 
     func load() async {
-        async let users = try? DB.fetch(
-            "profiles",
-            [DB.select("id,display_name,email"), DB.notIsNull("email")],
-            as: DirectoryUser.self
-        )
-        async let myGroups = try? DB.fetch(
-            "invite_groups",
-            [DB.select("id,name,emails"), DB.order("created_at", ascending: true)],
-            as: InviteGroup.self
-        )
+        async let users = try? CollegeAPI.inviteDirectory()
+        async let myGroups = try? CollegeAPI.inviteGroups()
         directory = await users ?? []
         groups = await myGroups ?? []
     }
 
     func createGroup(name: String, emails: [String]) async throws {
-        guard let userId = AuthStore.shared.user?.id else { return }
-        struct NewGroup: Encodable {
-            let owner_id: String
-            let name: String
-            let emails: [String]
-        }
-        let created: InviteGroup = try await DB.insert(
-            "invite_groups",
-            NewGroup(owner_id: userId, name: name, emails: emails),
-            returning: InviteGroup.self
-        )
+        let created = try await CollegeAPI.createInviteGroup(name: name, emails: emails)
         groups.append(created)
     }
 
     func deleteGroup(_ id: String) async throws {
-        try await DB.delete("invite_groups", [DB.eq("id", id)])
+        try await CollegeAPI.deleteInviteGroup(id: id)
         groups.removeAll { $0.id == id }
     }
 

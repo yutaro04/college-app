@@ -11,11 +11,12 @@ CREATE TABLE users (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- セッション（Cookie に持つ session id に対応）
+-- セッション。トークン本体は保存せず、SHA-256 ハッシュ（16進）を id に持つ（DB が漏れてもなりすませない）
+-- expires_at が NULL のセッションは無期限。ログアウトか、このテーブルの行を消すことで失効させる
 CREATE TABLE sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  expires_at TEXT NOT NULL,
+  expires_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_sessions_user_id ON sessions(user_id);

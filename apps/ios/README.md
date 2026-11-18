@@ -13,65 +13,53 @@ Web 版（Next.js PWA）の `collegeCalendar/frontend` を SwiftUI に移植し�
 ## アーキテクチャ
 
 ```
-┌────────────────┐
-│  iOS (このリポジトリ)   │
-└───┬────────────┬───┘
-    │            │
-    │ 認証・DB     │ イベント取得 / 投稿 / Google 連携
-    ▼            ▼
-┌─────────┐  ┌──────────────────────┐
-│ Supabase │  │ Web 版 Next.js /api/*  │
-│ (直接)    │  │ (既存のデプロイ先)        │
-└─────────┘  └──────────┬───────────┘
-                         │ service_role / GAS secret / Google client secret
-                         ▼
-              Google Sheets (EventCache) / GAS / Google Calendar
+┌──────────────┐
+│     iOS アプリ     │── Google に直接ログイン（PKCE）
+└──────┬───────┘
+       │ すべての通信（Bearer セッション）
+       ▼
+┌──────────────────────────┐
+│ services/api（Workers + D1 + R2） │──▶ GAS（共有カレンダーの読み書き。予定は 15 分ごとに D1 へ）
+└──────────────────────────┘──▶ Google Calendar（プライベートへの作成）
 ```
 
-**サーバーサイドのシークレットは iOS 側に一切持たない。**
-`SUPABASE_SERVICE_ROLE_KEY` / `GAS_POST_SECRET` / `GOOGLE_CLIENT_SECRET` を必要とする処理は
-Web 版の API Route をそのまま経由する。アプリに埋め込んでいるのは、Web 版でもブラウザに
-配信されている公開値（Supabase URL と anon key）だけ。
+**Supabase は廃止済み。** サーバー側のシークレット（GAS のシークレット等）は iOS に一切持たない。
+アプリに埋め込むのは公開してよい値（Google の iOS 用 OAuth クライアント ID など）だけ。
 
 | 機能 | 経路 |
 | --- | --- |
-| ログイン / セッション | Supabase GoTrue を直接（PKCE + `ASWebAuthenticationSession`） |
-| プロフィール・ひま・招待グループ | Supabase PostgREST を直接（RLS で保護） |
-| イベント一覧 | `GET /api/events` |
-| 投稿フォームの設定 | `GET /api/events/config` |
-| イベント作成 | `POST /api/events/create` |
-| Google refresh_token の保存 | `POST /api/auth/google-token` |
+| ログイン | Google に直接ログイン（`GoogleAuth`。PKCE + `ASWebAuthenticationSession`、client secret なし）→ access token を `POST /auth/google` に送って新 API のセッショントークン（無期限）を得る。どちらもキーチェーンに保存し、ログアウトするまで残す |
+| 表示名・ひま・招待グループ・MY EVENT | 新 API（`/residents/me`・`/hima-statuses`・`/invite-groups`・`/invite-directory`・`/calendar-events/mine`） |
+| イベント一覧 | 新 API `GET /calendar-events`（サーバーが GAS から取って D1 に溜めたもの） |
+| 投稿フォームの設定 | 新 API `GET /calendar-events/config` |
+| イベント作成 | 新 API `POST /calendar-events`（プライベートのときは端末の Google access token を添える） |
+| 図鑑・交流・日記 | 新 API |
 
 ---
 
 ## セットアップ
 
-### 1. Web 版のデプロイ先を設定する
+### 1. API の接続先を設定する
 
-`CollegeApp/Infrastructure/Config/AppConfig.swift` の `defaultWebAPIBaseURL` を、Web 版（Next.js）の
-実際のデプロイ URL に書き換える。
+`CollegeApp/Infrastructure/Config/AppConfig.swift` の `defaultCollegeAPIBaseURL` を、`services/api` を
+デプロイした URL（`https://college-app-api.<サブドメイン>.workers.dev`）に書き換える。
 
-```swift
-static let defaultWebAPIBaseURL = URL(string: "https://<本番のドメイン>")!
-```
+### 2. Google の OAuth クライアント（iOS 用）を作る（必須）
 
-> 現在はプレースホルダーが入っているので、**ここを直さないとイベント一覧が 404 になる**。
+1. Google Cloud Console > API とサービス > 認証情報 >「OAuth クライアント ID を作成」
+2. 種類は **iOS**、バンドル ID は `college.hlab.CollegeApp`
+3. 発行されたクライアント ID を `AppConfig.googleClientID` と、`services/api/wrangler.jsonc` の `GOOGLE_CLIENT_IDS` に入れる
+4. OAuth 同意画面は **「内部」**（hlab.college の組織内だけ）にしておく。Google 側でも組織外のアカウントを弾け、
+   calendar.events スコープの審査も不要になる。また「外部・テスト中」のままだとトークンが 7 日で切れる
+5. Google Calendar API を有効にする（プライベートカレンダーへの投稿に使う）
 
-### 2. Supabase にリダイレクト URL を登録する（必須）
+リダイレクト先は「クライアント ID を逆順にしたスキーム」（`com.googleusercontent.apps.xxxx:/oauth2redirect`）で、
+`ASWebAuthenticationSession` が受け取るので Info.plist への URL スキーム登録は不要。
 
-ネイティブアプリの OAuth コールバックはカスタム URL スキームで受け取る。
-Supabase ダッシュボード > **Authentication > URL Configuration > Redirect URLs** に以下を追加する。
+### 3. 新 API の接続先
 
-```
-collegeapp://auth-callback
-```
-
-これを登録しないと、Google ログイン後にアプリへ戻らず Web 版の URL にリダイレクトされる。
-
-### 3. Google Cloud 側
-
-Supabase の Google プロバイダ設定（client ID / secret）を Web 版と共用するため、
-**Google Cloud 側の追加設定は不要**。リダイレクト先は Supabase のコールバック URL のままでよい。
+`AppConfig.defaultCollegeAPIBaseURL` を、デプロイした Workers の URL に書き換える
+（開発中は起動引数 `-CollegeAPIBaseURL http://<Mac の IP>:8787` でも差し替えられる）。
 
 ### 4. ビルド
 
@@ -104,15 +92,14 @@ Xcode から実行する場合は、デバイスを選んで ⌘R でよい。
 
 ---
 
-## モックモード（既定で有効）
+## モックモード（起動引数で有効にする）
 
-バックエンド（`services/api`）が未実装のため、**現状は既定でモックモードで起動する**。
-`Infrastructure/Mock/MockURLProtocol.swift` が Supabase / Next.js API / `services/api` 宛ての通信を
+既定では本番の API（`AppConfig.defaultCollegeAPIBaseURL`）に繋ぎ、Google ログインを求める。
+起動引数 `-UseMockAPI YES` を渡すとモックモードになり、`Infrastructure/Mock/MockURLProtocol.swift` が `services/api` 宛ての通信を
 すべて横取りし、`MockBackend.swift`（インメモリ）がダミーデータを返す。ログインも自動（`下北 太郎`として）。
 
 - 初期データは `MockSeed.swift`（人物・会社名はすべて架空）。アプリを再起動すると初期状態に戻る
 - ひまを表明すると、約 10 秒後に誰かから誘いが届いたことになる（30 秒ポーリングで通知される）
-- 実サーバーに繋ぐ: 起動引数 `-UseMockAPI NO`
 - 文通で手紙を送ると約 15 秒後に相手から返事が来る。ひま募集を立てると約 10 秒後に誰かが参加する
 - 日記: 初回起動時に過去 2 週間分（ところどころ抜け）のサンプル日記を生成する。イベントのクリップも開いたときに
   他の人の分として 3 本生成する（`Infrastructure/Mock/SampleClipGenerator.swift`）
@@ -125,26 +112,26 @@ xcrun simctl launch booted college.hlab.CollegeApp -InitialTab directory
 
 ---
 
-## 開発時にローカルの Next.js を叩く
+## 開発時にローカルの API を叩く
 
 API のベース URL は起動引数で上書きできる。
 
 Xcode のスキーム > Run > Arguments > **Arguments Passed On Launch** に追加:
 
 ```
--WebAPIBaseURL http://localhost:3000     # シミュレータ
--WebAPIBaseURL http://192.168.x.x:3000   # 実機（Mac の LAN IP）
+-CollegeAPIBaseURL http://localhost:8787     # シミュレータ
+-CollegeAPIBaseURL http://192.168.x.x:8787   # 実機（Mac の LAN IP）
 ```
 
 コマンドラインから動かす場合:
 
 ```sh
 # シミュレータ
-xcrun simctl launch booted college.hlab.CollegeApp -WebAPIBaseURL http://localhost:3000
+xcrun simctl launch booted college.hlab.CollegeApp -CollegeAPIBaseURL http://localhost:8787
 
-# 実機（Mac と同じ Wi-Fi につないでおく。next dev は -H 0.0.0.0 で起動する）
+# 実機（Mac と同じ Wi-Fi につないでおく。wrangler dev は --ip 0.0.0.0 で起動する）
 xcrun devicectl device process launch --device "$DEVICE" --terminate-existing \
-  college.hlab.CollegeApp -WebAPIBaseURL http://192.168.x.x:3000
+  college.hlab.CollegeApp -CollegeAPIBaseURL http://192.168.x.x:8787
 ```
 
 `http://` 通信は `NSAllowsLocalNetworking` でローカルネットワークにのみ許可している（本番の HTTPS には影響しない）。
@@ -190,7 +177,7 @@ CollegeApp/
 │  ├─ Resident.swift                 図鑑の居住者・属性カテゴリ・属性タグ
 │  ├─ CoffeeChatRequest.swift
 │  ├─ Social.swift                   交流機能のモデル
-│  └─ SupabaseSession.swift         セッション / ユーザー / AuthError
+│  └─ AuthSession.swift             ログイン状態 / ユーザー / AuthError
 ├─ Application/                     ユースケース（ドメイン層のオーケストレーション）
 │  ├─ AuthStore.swift                useAuth 相当（ログイン・セッション管理）
 │  ├─ EventsStore.swift              useEvents 相当
@@ -203,13 +190,11 @@ CollegeApp/
 │  └─ SocialStores.swift             おすすめの店・気になる・誘って・空き時間/ひま募集・匿名文通
 ├─ Infrastructure/                  外部連携・永続化の実装
 │  ├─ Config/AppConfig.swift         接続先・許可ドメイン・OAuth スコープ
-│  ├─ Network/WebAPI.swift           Next.js API Route のクライアント
-│  ├─ Network/CollegeAPI.swift       services/api（Hono）のクライアント（+Social.swift に交流機能）
+│  ├─ Auth/GoogleAuth.swift          Google への直接ログイン（PKCE + ASWebAuthenticationSession）
+│  ├─ Network/CollegeAPI.swift       services/api（Hono）のクライアント
+│  │                                 （+Social.swift に交流機能、+Calendar.swift にひま・招待・カレンダー）
 │  ├─ Mock/                          モックモード（MockURLProtocol / MockBackend / MockSeed / SampleClipGenerator）
 │  ├─ Media/                         2 秒クリップの保存・切り出し・思い出ビデオ合成（AVFoundation）
-│  ├─ Supabase/
-│  │  ├─ SupabaseAuth.swift          PKCE + ASWebAuthenticationSession
-│  │  └─ PostgREST.swift             `DB.fetch/insert/update/delete`
 │  ├─ Persistence/KeychainStore.swift
 │  ├─ Notifications/LocalNotifier.swift  `UNUserNotificationCenter` のラッパー
 │  └─ StaticData/                    collegeInfo・mailingLists（固定データ）
@@ -229,12 +214,12 @@ CollegeApp/
 
 ## Web 版との差分（意図的なもの）
 
-- **Realtime を使わない**。Web 版は Supabase Realtime + 30 秒ポーリングの二重構成だったが、
-  iOS では WebSocket を持ち込まずポーリングに一本化している（新着の検知ロジックは同じ）。
+- **Realtime を使わない**。新着の誘いは 30 秒ポーリングで検知する。
 - **通知**は Service Worker ではなく `UNUserNotificationCenter` のローカル通知。
   許可は起動時ではなく「暇を表明した直後」（＝誘いが届きうるタイミング）に求める。
 - **イベント通知 / ランドリー通知**は Web 版でもリリース時非表示のため未移植。
-- お気に入りは `localStorage` ではなく `UserDefaults`、セッションはキーチェーンに保存。
+- お気に入りは `localStorage` ではなく `UserDefaults`、セッション・Google のトークンはキーチェーンに保存。
+- **アプリ全体がログイン必須**。未ログインならログイン画面だけを出す（一度ログインすればログアウトするまで出ない）。
 
 ## 未対応
 

@@ -11,11 +11,20 @@ struct CollegeAppApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView()
-                .environment(auth)
-                .environment(toast)
-                .tint(Theme.primary)
-                .task { await auth.restore() }
+            // アプリ全体がログイン必須。一度ログインすればキーチェーンから復元されるので、以後この画面は出ない
+            Group {
+                if auth.loading {
+                    ProgressView()
+                } else if auth.isSignedIn {
+                    RootView()
+                } else {
+                    LoginView()
+                }
+            }
+            .environment(auth)
+            .environment(toast)
+            .tint(Theme.primary)
+            .task { await auth.restore() }
         }
     }
 }

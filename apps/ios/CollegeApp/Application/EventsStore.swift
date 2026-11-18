@@ -9,15 +9,15 @@ final class EventsStore {
     private(set) var loading = true
     private(set) var error: String?
 
-    private var csvEvents: [CalendarEvent] = []
-    /// 投稿直後に EventCache へ反映されるまでの間、楽観的に表示するイベント
+    private var fetched: [CalendarEvent] = []
+    /// 投稿直後に一覧へ反映されるまでの間、楽観的に表示するイベント（プライベートの予定は一覧に載らないので、これで出す）
     private var localAdded: [CalendarEvent] = []
 
     func load() async {
         loading = true
         error = nil
         do {
-            csvEvents = try await WebAPI.fetchEvents()
+            fetched = try await CollegeAPI.calendarEvents()
         } catch {
             self.error = error.localizedDescription
         }
@@ -29,7 +29,7 @@ final class EventsStore {
     func refresh() async {
         error = nil
         do {
-            csvEvents = try await WebAPI.fetchEvents()
+            fetched = try await CollegeAPI.calendarEvents()
             rebuild()
         } catch {
             self.error = error.localizedDescription
@@ -42,11 +42,11 @@ final class EventsStore {
         rebuild()
     }
 
-    /// CSV イベント + まだ CSV に載っていないローカル追加分をマージし、繰り返しフラグを付与
+    /// 取得したイベント + まだ一覧に載っていないローカル追加分をマージし、繰り返しフラグを付与
     private func rebuild() {
-        let csvIDs = Set(csvEvents.map(\.id))
-        let pending = localAdded.filter { !csvIDs.contains($0.id) }
-        let merged = pending + csvEvents
+        let fetchedIDs = Set(fetched.map(\.id))
+        let pending = localAdded.filter { !fetchedIDs.contains($0.id) }
+        let merged = pending + fetched
 
         var counts: [String: Int] = [:]
         for e in merged { counts[e.id, default: 0] += 1 }

@@ -2,7 +2,6 @@ import Foundation
 
 /// 交流機能（おすすめの店・気になる・誘って・空き時間・ひま募集・匿名文通）のエンドポイント
 extension CollegeAPI {
-    private struct Empty: Decodable {}
 
     // MARK: - おすすめの店
 

@@ -8,12 +8,29 @@ struct HimaScreen: View {
     @State private var store = AvailabilityStore()
     @State private var editing = false
     @State private var inviteTarget: AvailabilityEntry?
+    @State private var mode: Mode = .initial(.now)
+
+    enum Mode: String, SegmentOption {
+        case now, gather, free
+
+        var label: String {
+            switch self {
+            case .now: return "いまひま"
+            case .gather: return "募集"
+            case .free: return "空き時間"
+            }
+        }
+    }
 
     var body: some View {
         NavigationStack {
             Group {
                 if !auth.isSignedIn {
                     LoginView()
+                } else if mode == .gather {
+                    GatheringListView()
+                } else if mode == .free {
+                    FreeSlotsView()
                 } else if store.loading {
                     LoadingView()
                 } else if let error = store.error, store.entries.isEmpty {
@@ -21,6 +38,9 @@ struct HimaScreen: View {
                 } else {
                     content
                 }
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if auth.isSignedIn { SegmentBar(selection: $mode) }
             }
             .background(Theme.surface)
             .navigationTitle("ひま")

@@ -159,6 +159,90 @@ Android で同等機能を作る場合は `Media3 Transformer`（Jetpack）が A
 | GET | `/events/:eventId/memory-video` | ジョブの状態・クリップ/MP3のURL（合成待ち）・完成動画URL（完成後）を取得 |
 | PATCH | `/events/:eventId/memory-video` | 合成端末（iOS）からの状態更新。`{status: "processing"}` で合成開始を宣言（二重実行防止）、`{status: "completed", file}`（multipart）で完成動画をアップロード、`{status: "failed", errorMessage}` で失敗報告 |
 
+### 日記（setlog 風の 2 秒クリップ）
+
+テーブル定義: [`infrastructure/db/migrations/0004_daily_clips.sql`](infrastructure/db/migrations/0004_daily_clips.sql)
+
+クリップは日常用とイベント用の 2 種類に分ける。
+
+| | 日常（`daily_clips`） | イベント（`event_video_clips`） |
+| --- | --- | --- |
+| 単位 | 1 人 1 日 1 本（撮り直しは上書き） | 1 イベントに何本でも、誰でも |
+| 見える人 | 本人だけ | みんな |
+| 思い出ビデオ | 期間を選んで本人の端末で合成（サーバーに保存しない。音源は任意） | `event_memory_videos` の流れ（音源 MP3 必須） |
+
+- カレンダーのイベントは Google カレンダー由来で D1 の `events` に行が無いので、
+  `POST /events/resolve` で `calendar_event_id + event_date` から find-or-create してから `/events/:id/clips` に投稿する
+- 長さ 2 秒はアプリ側で切り出してからアップロードする（DB では強制しない）
+
+| Method | Path | 説明 |
+| --- | --- | --- |
+| GET | `/daily-clips?from=&to=` | 自分の日記クリップ一覧 |
+| PUT | `/daily-clips/:date` | multipart `{file, caption?}`。その日のクリップを作成 or 上書き |
+| DELETE | `/daily-clips/:date` | |
+| POST | `/events/resolve` | `{calendarEventId, title, eventDate}` → `{event}`（find-or-create） |
+
+### 交流機能
+
+テーブル定義: [`infrastructure/db/migrations/0003_social.sql`](infrastructure/db/migrations/0003_social.sql)
+
+```
+Resident ──1:N── ResidentRecommendation（おすすめの店。genre: cafe/restaurant/bar/shop/other）
+Resident ──N:M── Resident  ResidentLike（kind: like/pass, topic。双方 like でマッチ）
+Resident ──1:N── InviteWish（〇〇あったら誘って）──1:N── InviteWishInvitation
+Resident ──1:N── ResidentFreeSlot（空き時間）
+Resident ──1:N── HimaGathering（ひま募集）──N:M── Resident（hima_gathering_participants）
+PenPalThread（starter/partner + それぞれのペンネーム）──1:N── PenPalLetter
+                                                      └─1:N── PenPalReport（通報）
+```
+
+設計判断:
+
+- **気になる（マチアプ風）は相互いいね**。1 ペア 1 行（`resident_likes` の PK）で、両方向が `like` のときだけ
+  マッチとして相手を返す。片思いの相手は返さず、`/likes/received-count` で人数だけ見せる。
+  「マッチングは属性検索のみ・自動マッチングのバッチは行わない」という決定とは別物（本人の操作だけで成立し、バッチ処理はない）。
+  候補の並び順は共通属性数（`/residents/matches` と同じ考え方）
+- **空き時間は本人が手で登録する**（`resident_free_slots`）。Google カレンダーの free/busy から自動生成する場合も
+  このテーブルに書く想定（未実装）
+- **いま暇の「表明」は既存の Supabase `availability` のまま**。新設の `hima_gatherings` は
+  「この時間空いてるから誰か〇〇しよう」と時間指定で人を集めるもの。表明の D1 移行は既存機能の移行とまとめて行う
+- **匿名文通の匿名性はサーバーで守る**。手紙を出すとサーバーが相手をランダムに選び、ペンネームを振る。
+  レスポンスには `myAlias` / `partnerAlias` だけを返し、相手の resident id・表示名は**絶対に返さない**。
+  嫌がらせ対策として「文通を終える」と運営への通報（`pen_pal_reports`）を用意（運営側の確認画面は別途）
+
+| Method | Path | 説明 |
+| --- | --- | --- |
+| GET | `/recommendations?genre=` | みんなのおすすめの店（投稿者つき） |
+| GET | `/residents/:id/recommendations` | その人のおすすめの店 |
+| POST | `/residents/me/recommendations` | `{name, genre, area?, comment?, url?}` |
+| DELETE | `/residents/me/recommendations/:id` | |
+| GET | `/likes/discover` | まだ振り分けていない人（共通点の多い順。カード用） |
+| PUT | `/likes/:residentId` | `{kind: "like" \| "pass", topic?}` → `{matched}` |
+| GET | `/likes/matches` | マッチした相手（お互いの topic つき） |
+| GET | `/likes/received-count` | 自分を気になっている人数 |
+| GET | `/invite-wishes?residentId=` | 「〇〇あったら誘って」一覧 |
+| POST | `/residents/me/invite-wishes` | `{title, note?}` |
+| DELETE | `/residents/me/invite-wishes/:id` | |
+| POST | `/invite-wishes/:id/invitations` | `{message}` で誘う |
+| GET | `/invite-wishes/invitations` | 自分の「誘って」に届いた誘い |
+| GET | `/residents/:id/free-slots` | その人の空き時間（今日から 7 日間） |
+| GET | `/free-slots?from=&to=` | 指定時間帯をまるごと空けている人。期間省略時は全員の 7 日分 |
+| POST | `/residents/me/free-slots` | `{startsAt, endsAt, note?}` |
+| DELETE | `/residents/me/free-slots/:id` | |
+| GET | `/hima-gatherings` | これからのひま募集（主催者・参加者つき） |
+| POST | `/hima-gatherings` | `{title, location?, startsAt, endsAt, capacity?, note?}` |
+| DELETE | `/hima-gatherings/:id` | 主催者が取り消す |
+| POST / DELETE | `/hima-gatherings/:id/join` | 参加 / 参加取り消し（定員超過は 409） |
+| GET | `/pen-pals` | 自分の文通一覧（ペンネーム・最新の手紙・未読数） |
+| POST | `/pen-pals` | `{body}` ランダムな相手に最初の手紙を出す |
+| GET | `/pen-pals/:id/letters` | 手紙一覧（取得時に既読化） |
+| POST | `/pen-pals/:id/letters` | `{body}` 返事を書く |
+| PATCH | `/pen-pals/:id` | `{action: "close"}` 文通を終える |
+| POST | `/pen-pals/:id/report` | `{reason?}` 運営へ通報 |
+
+レスポンスの JSON 形状は iOS のモック（`apps/ios/CollegeApp/Infrastructure/Mock/MockBackend+Social.swift`）が
+事実上の仕様になっている。実装時はそれに合わせること。
+
 ## ディレクトリ構成（DDD）
 
 ```
@@ -216,6 +300,8 @@ npm run typecheck
 - [x] 思い出ビデオの音源の扱いを決定（MP3アップロード方式。YouTube音声抽出は行わない）
 - [x] 思い出ビデオの合成基盤を決定（外部APIやVPSは使わず、iOSでAVFoundationによるオンデバイス合成）
 - [x] Hono プロジェクト雛形の作成（`wrangler.jsonc`, `package.json`, D1/R2 bindings, ルート一式）
+- [x] 交流機能（おすすめの店・気になる・誘って・空き時間・ひま募集・匿名文通）のテーブル定義・API 設計・ルートのスタブ
+- [x] 日記（日常用 daily_clips / イベント用との分離）のテーブル定義・API 設計・スタブ
 - [ ] D1 データベース / R2 バケットの実作成（`wrangler d1 create` / `wrangler r2 bucket create`。要 Cloudflare アカウント認証）
 - [ ] 各エンドポイントの実装（現状 `/health` と `/attribute-categories` 以外は 501 スタブ）
 - [ ] 自前セッション認証（Google OAuth + Cookie セッション）の実装

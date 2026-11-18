@@ -4,21 +4,20 @@ import SwiftUI
 struct InfoScreen: View {
     @State private var openTitle: String?
 
+    /// 設定タブの NavigationStack 内に push して表示する
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(CollegeInfo.sections) { section in
-                        sectionCard(section)
-                    }
+        ScrollView {
+            VStack(spacing: 8) {
+                ForEach(CollegeInfo.sections) { section in
+                    sectionCard(section)
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 32)
             }
-            .background(Theme.surface)
-            .navigationTitle("各種情報")
-            .navigationBarTitleDisplayMode(.large)
+            .padding(.horizontal, 16)
+            .padding(.bottom, 32)
         }
+        .background(Theme.surface)
+        .navigationTitle("各種情報")
+        .navigationBarTitleDisplayMode(.large)
     }
 
     private func sectionCard(_ section: InfoSection) -> some View {

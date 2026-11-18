@@ -14,6 +14,8 @@ export interface Event {
   id: string
   title: string
   eventDate: string
+  /** カレンダー（Google カレンダー由来）のイベント ID。カレンダー外で作ったイベントは null */
+  calendarEventId: string | null
   createdByResidentId: string | null
   createdAt: string
 }
@@ -39,4 +41,17 @@ export interface EventMemoryVideo {
   errorMessage: string | null
   createdAt: string
   completedAt: string | null
+}
+
+/** 日記（setlog 風）の 1 日 1 本の 2 秒クリップ。本人だけが見られる */
+export interface DailyClip {
+  id: string
+  residentId: string
+  /** 端末ローカルの日付 yyyy-MM-dd */
+  clipDate: string
+  r2Key: string
+  durationMs: number | null
+  caption: string | null
+  createdAt: string
+  updatedAt: string
 }

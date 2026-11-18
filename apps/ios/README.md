@@ -104,6 +104,27 @@ Xcode から実行する場合は、デバイスを選んで ⌘R でよい。
 
 ---
 
+## モックモード（既定で有効）
+
+バックエンド（`services/api`）が未実装のため、**現状は既定でモックモードで起動する**。
+`Infrastructure/Mock/MockURLProtocol.swift` が Supabase / Next.js API / `services/api` 宛ての通信を
+すべて横取りし、`MockBackend.swift`（インメモリ）がダミーデータを返す。ログインも自動（`下北 太郎`として）。
+
+- 初期データは `MockSeed.swift`（人物・会社名はすべて架空）。アプリを再起動すると初期状態に戻る
+- ひまを表明すると、約 10 秒後に誰かから誘いが届いたことになる（30 秒ポーリングで通知される）
+- 実サーバーに繋ぐ: 起動引数 `-UseMockAPI NO`
+- 文通で手紙を送ると約 15 秒後に相手から返事が来る。ひま募集を立てると約 10 秒後に誰かが参加する
+- 日記: 初回起動時に過去 2 週間分（ところどころ抜け）のサンプル日記を生成する。イベントのクリップも開いたときに
+  他の人の分として 3 本生成する（`Infrastructure/Mock/SampleClipGenerator.swift`）
+- 最初に開くタブを指定: `-InitialTab calendar|hima|directory|connect|diary`
+- タブ内のセグメントも指定できる: `-InitialSegment now|gather|free|people|recommendations|wishes|coffeeChat|likes|penPal|daily|event`
+
+```sh
+xcrun simctl launch booted college.hlab.CollegeApp -InitialTab directory
+```
+
+---
+
 ## 開発時にローカルの Next.js を叩く
 
 API のベース URL は起動引数で上書きできる。
@@ -140,9 +161,16 @@ Web 版のリリース時の構成に合わせている（Laundry / Bathroom は
 | ↑ 注目イベントのカルーセル | `Presentation/Calendar/FeaturedHeader.swift` | `Header.tsx` |
 | ↑ イベントカード | `Presentation/Calendar/EventRow.swift` | `EventCard.tsx` |
 | ↑ イベント追加 | `Presentation/Calendar/AddEventSheet.swift` + `InviteUserPickerView.swift` | `AddEventModal.tsx` / `InviteUserPicker.tsx` |
-| ひま | `Presentation/Hima/HimaScreen.swift` | `HimaView.tsx` / `AvailabilityView.tsx` |
-| 各種情報 | `Presentation/Info/InfoScreen.swift` | `InfoView.tsx` |
-| Settings | `Presentation/Settings/SettingsScreen.swift` | `SettingsView.tsx` / `ProfileView.tsx` |
+| ひま（いまひま） | `Presentation/Hima/HimaScreen.swift` | `HimaView.tsx` / `AvailabilityView.tsx` |
+| ↑ 募集・空き時間 | `Presentation/Hima/HimaPlanViews.swift` | （新規） |
+| 図鑑（みんな） | `Presentation/Directory/DirectoryScreen.swift` + `ResidentDetailView.swift` | （新規） |
+| ↑ おすすめ店・誘って | `Presentation/Directory/CommunityBoardViews.swift` | （新規） |
+| 交流（コヒチャ） | `Presentation/Connect/ConnectScreen.swift` | （新規） |
+| ↑ 気になる・文通 | `Presentation/Connect/LikesView.swift` / `PenPalViews.swift` | （新規） |
+| 日記（日常・イベント） | `Presentation/Diary/DiaryScreen.swift` + `ClipCapture.swift` | （新規。setlog 風） |
+| Settings（日記タブの歯車から） | `Presentation/Settings/SettingsScreen.swift` | `SettingsView.tsx` / `ProfileView.tsx` |
+| ↑ 図鑑プロフィール編集 | `Presentation/Directory/MyDirectoryProfileView.swift` | （新規） |
+| ↑ 各種情報 | `Presentation/Info/InfoScreen.swift` | `InfoView.tsx` |
 
 ---
 
@@ -159,16 +187,26 @@ CollegeApp/
 │  ├─ CalendarEvent.swift
 │  ├─ Profile.swift
 │  ├─ Availability.swift
+│  ├─ Resident.swift                 図鑑の居住者・属性カテゴリ・属性タグ
+│  ├─ CoffeeChatRequest.swift
+│  ├─ Social.swift                   交流機能のモデル
 │  └─ SupabaseSession.swift         セッション / ユーザー / AuthError
 ├─ Application/                     ユースケース（ドメイン層のオーケストレーション）
 │  ├─ AuthStore.swift                useAuth 相当（ログイン・セッション管理）
 │  ├─ EventsStore.swift              useEvents 相当
 │  ├─ AddEventStore.swift            useAddEvent + 招待ピッカー
 │  ├─ AvailabilityStore.swift        useAvailability 相当
-│  └─ FavoritesStore.swift           useFavorites + MY EVENT
+│  ├─ FavoritesStore.swift           useFavorites + MY EVENT
+│  ├─ DirectoryStore.swift           図鑑（一覧・絞り込み・マッチング・自分のタグ）
+│  ├─ CoffeeChatStore.swift          コーヒーチャット申請
+│  ├─ ClipStores.swift               日記（日常 DiaryStore / イベント EventClipsStore）
+│  └─ SocialStores.swift             おすすめの店・気になる・誘って・空き時間/ひま募集・匿名文通
 ├─ Infrastructure/                  外部連携・永続化の実装
 │  ├─ Config/AppConfig.swift         接続先・許可ドメイン・OAuth スコープ
 │  ├─ Network/WebAPI.swift           Next.js API Route のクライアント
+│  ├─ Network/CollegeAPI.swift       services/api（Hono）のクライアント（+Social.swift に交流機能）
+│  ├─ Mock/                          モックモード（MockURLProtocol / MockBackend / MockSeed / SampleClipGenerator）
+│  ├─ Media/                         2 秒クリップの保存・切り出し・思い出ビデオ合成（AVFoundation）
 │  ├─ Supabase/
 │  │  ├─ SupabaseAuth.swift          PKCE + ASWebAuthenticationSession
 │  │  └─ PostgREST.swift             `DB.fetch/insert/update/delete`
@@ -209,10 +247,11 @@ CollegeApp/
 `services/api`（Cloudflare Workers + D1 + R2）側で設計済みの新機能を iOS 側にも実装する。
 詳細な API 設計は [`services/api/README.md`](../../services/api/README.md) を参照。
 
-- カレッジ生図鑑（居住者一覧・プロフィール・属性タグによる検索）
+- ~~カレッジ生図鑑（居住者一覧・プロフィール・属性タグによる検索）~~ → UI実装済み（モックデータで動作）
+- ~~コーヒーチャット申請（1on1 のお誘い）~~ → UI実装済み（モックデータで動作）
 - 顔写真・紙の図鑑のスキャン画像・関連写真の投稿
-- コーヒーチャット申請（1on1 のお誘い）
-- イベントごとの短尺動画クリップの投稿
-- **思い出ビデオの生成は iOS 側の責務**: `AVMutableComposition` + `AVAssetExportSession` で
+- ~~イベントごとの短尺動画クリップの投稿~~ → 日記タブに実装済み（日常用の毎日 2 秒と分けている）。
+  アップロード API が未実装のため、現状クリップは端末内にだけ保存される
+- **思い出ビデオの生成は iOS 側の責務**（`Infrastructure/Media/MemoryVideoComposer.swift` で実装済み）: `AVMutableComposition` + `AVAssetExportSession` で
   クリップを連結し、居住者がアップロードした MP3 を `AVMutableAudioMix` でミックスして
   オンデバイスで書き出す（サーバー側では合成処理を行わない）。Web 版は完成した動画の再生のみ対応。

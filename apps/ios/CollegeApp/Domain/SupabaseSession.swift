@@ -21,6 +21,14 @@ struct SupabaseSession: Codable, Equatable {
         case user
     }
 
+    init(accessToken: String, refreshToken: String, expiresAt: Date, providerRefreshToken: String? = nil, user: SupabaseUser) {
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.expiresAt = expiresAt
+        self.providerRefreshToken = providerRefreshToken
+        self.user = user
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         accessToken = try c.decode(String.self, forKey: .accessToken)

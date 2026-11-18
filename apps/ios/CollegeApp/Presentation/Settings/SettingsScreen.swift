@@ -12,7 +12,12 @@ struct SettingsScreen: View {
                 if auth.isSignedIn {
                     ProfileForm()
                 } else {
-                    LoginView()
+                    VStack(spacing: 0) {
+                        LoginView()
+                        NavigationLink("各種情報") { InfoScreen() }
+                            .font(.system(size: 14, weight: .semibold))
+                            .padding(.bottom, 32)
+                    }
                 }
             }
             .background(Theme.surface)
@@ -38,6 +43,13 @@ private struct ProfileForm: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 12) {
+                if AppConfig.useMockAPI {
+                    Label("モックモード: 表示中のデータはすべてダミーです", systemImage: "testtube.2")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Color.orange)
+                        .cardStyle(padding: 12)
+                }
+
                 VStack(alignment: .leading, spacing: 4) {
                     Text("メールアドレス")
                         .font(.system(size: 12))
@@ -74,6 +86,14 @@ private struct ProfileForm: View {
                 }
                 .cardStyle()
 
+                VStack(spacing: 0) {
+                    settingsLink("図鑑プロフィール", icon: "person.text.rectangle") { MyDirectoryProfileView() }
+                    Divider().padding(.leading, 44)
+                    settingsLink("各種情報", icon: "info.circle") { InfoScreen() }
+                }
+                .background(Theme.card, in: RoundedRectangle(cornerRadius: Theme.cardCornerRadius, style: .continuous))
+                .shadow(color: Theme.cardShadow, radius: 2, x: 0, y: 1)
+
                 Button("ログアウト") { showSignOutConfirm = true }
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.red)
@@ -95,6 +115,28 @@ private struct ProfileForm: View {
             }
             Button("キャンセル", role: .cancel) {}
         }
+    }
+
+    private func settingsLink(_ title: String, icon: String, @ViewBuilder destination: () -> some View) -> some View {
+        NavigationLink(destination: destination) {
+            HStack(spacing: 12) {
+                Image(systemName: icon)
+                    .font(.system(size: 15))
+                    .foregroundStyle(Theme.primary)
+                    .frame(width: 20)
+                Text(title)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Theme.textPrimary)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.textTertiary)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private func save() async {

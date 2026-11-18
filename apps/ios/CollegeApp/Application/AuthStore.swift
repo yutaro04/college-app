@@ -27,6 +27,13 @@ final class AuthStore {
     func restore() async {
         defer { loading = false }
 
+        // モックモードではダミーのセッションで自動ログインする（キーチェーンには保存しない）
+        if AppConfig.useMockAPI {
+            session = MockSeed.session
+            await fetchProfile()
+            return
+        }
+
         guard let data = KeychainStore.load(key: Self.sessionKey),
               let stored = try? JSONDecoder().decode(SupabaseSession.self, from: data)
         else { return }
@@ -50,6 +57,11 @@ final class AuthStore {
 
     func signInWithGoogle() async {
         authError = nil
+        if AppConfig.useMockAPI {
+            session = MockSeed.session
+            await fetchProfile()
+            return
+        }
         do {
             let newSession = try await SupabaseAuth.signInWithGoogle()
             persist(newSession)

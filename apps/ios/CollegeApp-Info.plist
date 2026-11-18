@@ -56,6 +56,10 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>日記やイベントの2秒動画を撮影するためにカメラを使います</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>2秒動画に音を入れるためにマイクを使います</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSAppTransportSecurity</key>

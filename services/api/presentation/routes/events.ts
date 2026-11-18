@@ -4,6 +4,10 @@ import { notImplemented } from './_notImplemented'
 
 export const eventsRoute = new Hono<{ Bindings: Env }>()
 
+// POST /events/resolve — {calendarEventId, title, eventDate}。カレンダーのイベントに対応する
+// events 行を find-or-create して返す（クリップの投稿先 eventId を得るため）
+eventsRoute.post('/resolve', notImplemented)
+
 // POST /events/:eventId/clips — multipart アップロードして EventVideoClip 作成
 eventsRoute.post('/:eventId/clips', notImplemented)
 // GET /events/:eventId/clips — クリップ一覧（合成端末がダウンロードする素材）

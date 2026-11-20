@@ -455,7 +455,15 @@ private struct EventClipListView: View {
             .padding(.horizontal, 16)
             .padding(.bottom, 32)
         }
-        .task { if events.events.isEmpty { await events.load() } }
+        .task {
+            await events.ensurePast()
+            await clips.loadCounts()
+        }
+        .refreshable {
+            await events.refresh()
+            await events.ensurePast()
+            await clips.loadCounts()
+        }
     }
 }
 
@@ -465,15 +473,16 @@ struct EventClipsView: View {
 
     @Environment(AuthStore.self) private var auth
     @Environment(EventClipsStore.self) private var store
-    @Environment(DirectoryStore.self) private var directory
     @Environment(ToastCenter.self) private var toast
 
-    @State private var playing: ClipFileStore.EventClip?
+    @State private var playing: EventClip?
     @State private var music: URL?
     @State private var composing = false
     @State private var output: ExportedVideo?
 
-    private var clips: [ClipFileStore.EventClip] { store.clips(for: event) }
+    private var clips: [EventClip] { store.clips(for: event) }
+    /// 思い出ビデオに使える（ダウンロード済みの）本数
+    private var readyCount: Int { clips.filter { store.localURL($0) != nil }.count }
     private var myId: String { auth.user?.id ?? "" }
 
     var body: some View {
@@ -493,7 +502,7 @@ struct EventClipsView: View {
                         .foregroundStyle(Theme.textTertiary)
                     ClipSourceButtons { url in
                         do {
-                            try await store.add(source: url, to: event, authorId: myId)
+                            try await store.add(source: url, to: event)
                             toast.show("投稿しました")
                         } catch {
                             toast.show(error.localizedDescription)
@@ -512,7 +521,7 @@ struct EventClipsView: View {
                         Button {
                             playing = clip
                         } label: {
-                            ClipThumbnail(url: clip.url)
+                            thumbnail(clip)
                                 .aspectRatio(9 / 16, contentMode: .fit)
                                 .overlay(alignment: .bottomLeading) {
                                     Text(authorName(clip))
@@ -523,7 +532,15 @@ struct EventClipsView: View {
                                 }
                         }
                         .buttonStyle(.plain)
+                        .disabled(store.localURL(clip) == nil)
                     }
+                }
+
+                if let error = store.error {
+                    Text(error)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.textSecondary)
+                        .padding(.horizontal, 4)
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
@@ -536,12 +553,12 @@ struct EventClipsView: View {
                         if composing {
                             HStack { ProgressView().tint(.white); Text("書き出し中…") }
                         } else {
-                            Label("\(clips.count)本をつなげて作る", systemImage: "sparkles.tv")
+                            Label("\(readyCount)本をつなげて作る", systemImage: "sparkles.tv")
                         }
                     }
                     .buttonStyle(PrimaryButtonStyle())
-                    .disabled(composing || clips.isEmpty || music == nil)
-                    .opacity(clips.isEmpty || music == nil ? 0.5 : 1)
+                    .disabled(composing || readyCount == 0 || music == nil)
+                    .opacity(readyCount == 0 || music == nil ? 0.5 : 1)
                 }
                 .cardStyle()
             }
@@ -551,36 +568,56 @@ struct EventClipsView: View {
         .background(Theme.surface)
         .navigationBarTitleDisplayMode(.inline)
         .overlay {
-            if store.preparingSamples {
-                ProgressView("サンプル動画を準備中…")
+            if store.loading {
+                ProgressView("クリップを読み込み中…")
                     .padding(20)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
             }
         }
-        .task {
-            await store.load(event)
-            if directory.residents.isEmpty { await directory.load() }
-        }
+        .task { await store.load(event) }
+        .refreshable { await store.load(event) }
         .sheet(item: $playing) { clip in
-            VideoPlayerSheet(
-                url: clip.url, title: authorName(clip),
-                extraActions: clip.authorId == myId ? AnyView(
-                    Button("自分のクリップを削除", role: .destructive) {
-                        store.delete(clip, from: event)
-                        playing = nil
-                    }
-                    .font(.system(size: 13))
-                ) : nil
-            )
+            if let url = store.localURL(clip) {
+                VideoPlayerSheet(
+                    url: url, title: authorName(clip),
+                    extraActions: clip.residentId == myId ? AnyView(
+                        Button("自分のクリップを削除", role: .destructive) {
+                            Task { await delete(clip) }
+                        }
+                        .font(.system(size: 13))
+                    ) : nil
+                )
+            }
         }
         .sheet(item: $output) { video in
             VideoPlayerSheet(url: video.url, title: "思い出ビデオ")
         }
     }
 
-    private func authorName(_ clip: ClipFileStore.EventClip) -> String {
-        if clip.authorId == myId { return "あなた" }
-        return directory.residents.first { $0.id == clip.authorId }?.displayName ?? ""
+    /// ダウンロードが済むまではサムネイルの代わりにくるくるを出す
+    @ViewBuilder
+    private func thumbnail(_ clip: EventClip) -> some View {
+        if let url = store.localURL(clip) {
+            ClipThumbnail(url: url)
+        } else {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(.tertiarySystemFill))
+                .overlay { ProgressView() }
+        }
+    }
+
+    private func authorName(_ clip: EventClip) -> String {
+        clip.residentId == myId ? "あなた" : clip.author.displayName
+    }
+
+    private func delete(_ clip: EventClip) async {
+        do {
+            try await store.delete(clip, from: event)
+            playing = nil
+            toast.show("削除しました")
+        } catch {
+            toast.show(error.localizedDescription)
+        }
     }
 
     private func compose() async {

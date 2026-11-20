@@ -181,23 +181,26 @@ enum CollegeAPI {
 
     private struct ErrorBody: Decodable { let error: String }
 
-    /// `CollegeAPI+Social.swift` からも使うので internal にしている
+    /// `CollegeAPI+Social.swift` などからも使うので internal にしている。
+    /// `upload` は JSON 以外の本文（multipart など）を (本文, Content-Type) で送るとき用
     static func send<T: Decodable>(
-        path: String, method: String = "GET", query: [URLQueryItem] = [], json: (any Encodable)? = nil
+        path: String, method: String = "GET", query: [URLQueryItem] = [], json: (any Encodable)? = nil,
+        upload: (Data, String)? = nil
     ) async throws -> T {
         var comps = URLComponents(
             url: AppConfig.collegeAPIBaseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false
         )!
         if !query.isEmpty { comps.queryItems = query }
 
-        var req = URLRequest(url: comps.url!)
-        req.httpMethod = method
-        req.timeoutInterval = 30
-        let token = Session.token
-        if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        var req = request(comps.url!, method: method)
         if let json {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONEncoder().encode(json)
+        }
+        if let (body, contentType) = upload {
+            req.setValue(contentType, forHTTPHeaderField: "Content-Type")
+            req.httpBody = body
+            req.timeoutInterval = 120
         }
 
         let (data, response): (Data, URLResponse)
@@ -208,10 +211,7 @@ enum CollegeAPI {
         }
 
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
-        if status == 401, token != nil {
-            // サーバー側でセッションが消された（ログアウト・管理者による失効）のでログイン画面へ戻す
-            await AuthStore.shared.sessionRevoked()
-        }
+        await handleUnauthorized(status, request: req)
         if data.isEmpty, (200..<300).contains(status), let empty = Empty() as? T { return empty }
         guard (200..<300).contains(status) else {
             let message = (try? JSONDecoder().decode(ErrorBody.self, from: data))?.error
@@ -221,6 +221,37 @@ enum CollegeAPI {
             return try JSONDecoder().decode(T.self, from: data)
         } catch {
             throw APIError.message("サーバーから予期しない応答が返りました (\(status))")
+        }
+    }
+
+    /// 動画などのファイルを destination に保存する（既存ファイルは置き換える）
+    static func download(path: String, to destination: URL) async throws {
+        let req = request(AppConfig.collegeAPIBaseURL.appendingPathComponent(path), method: "GET", timeout: 120)
+        let (temp, response): (URL, URLResponse)
+        do {
+            (temp, response) = try await URLSession.shared.download(for: req)
+        } catch {
+            throw APIError.message("ネットワークエラー")
+        }
+        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        await handleUnauthorized(status, request: req)
+        guard (200..<300).contains(status) else { throw APIError.message("ダウンロードに失敗しました (\(status))") }
+        try? FileManager.default.removeItem(at: destination)
+        try FileManager.default.moveItem(at: temp, to: destination)
+    }
+
+    private static func request(_ url: URL, method: String, timeout: TimeInterval = 30) -> URLRequest {
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        req.timeoutInterval = timeout
+        if let token = Session.token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        return req
+    }
+
+    private static func handleUnauthorized(_ status: Int, request: URLRequest) async {
+        if status == 401, request.value(forHTTPHeaderField: "Authorization") != nil {
+            // サーバー側でセッションが消された（ログアウト・管理者による失効）のでログイン画面へ戻す
+            await AuthStore.shared.sessionRevoked()
         }
     }
 }

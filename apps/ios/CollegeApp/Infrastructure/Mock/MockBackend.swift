@@ -27,14 +27,18 @@ final class MockBackend: @unchecked Sendable {
     private var attributes: [ResidentAttribute] = []
     var residents: [ResidentRow] = []
     private var coffeeChats: [CoffeeChatRequest] = []
-    private var events: [CalendarEvent]
+    var events: [CalendarEvent]
     /// いまひま・カレンダー招待・MY EVENT（`/hima-statuses` `/invite-groups` `/calendar-events`）
     private var himaStatuses: [MockSeed.HimaStatusRow]
     private var himaInvites: [MockSeed.HimaInviteRow] = []
     private var inviteGroups: [InviteGroup]
     private var createdEventIds: [String] = []
+    /// カレンダーの予定の版（予定が変わったときだけ進む。`GET /calendar-events` の version）
+    private var calendarVersion = ISODate.string(from: Date())
     /// 交流機能の状態（`MockBackend+Social.swift`）
     var social = MockSocialState()
+    /// 日記のイベントクリップの状態（`MockBackend+Events.swift`）
+    var eventClips = MockEventClipState()
 
     private init() {
         categories = MockSeed.categories
@@ -83,6 +87,21 @@ final class MockBackend: @unchecked Sendable {
         switch (method, route) {
         case ("GET", "health"):
             return json(["ok": true])
+
+        case ("GET", "calendar-events"):
+            if query.value("version") == calendarVersion {
+                return json(["notModified": true, "version": calendarVersion])
+            }
+            let from = query.value("from") ?? "", to = query.value("to") ?? "9999"
+            let page = events.filter { $0.dateKey >= from && $0.dateKey <= to }.sorted { $0.startISO < $1.startISO }
+            let syncEnd = DateUtil.dateKey(Calendar.current.date(byAdding: .day, value: 60, to: Date())!)
+            struct Page: Encodable {
+                let notModified = false
+                let version: String
+                let events: [CalendarEvent]
+                let hasMore: Bool
+            }
+            return encode(Page(version: calendarVersion, events: page, hasMore: to < syncEnd))
 
         case ("GET", "auth/me"), ("GET", "residents/me"):
             return encode(MeResponse(email: MockSeed.myEmail, resident: resident(myId)!))
@@ -199,6 +218,7 @@ final class MockBackend: @unchecked Sendable {
             return encode(["request": coffeeChats[index]])
 
         default:
+            if path.first == "events" { return eventsAPI(method: method, path: path, query: query, input: input) }
             if let reply = legacyAPI(method: method, route: route, param: param, input: input) { return reply }
             return socialAPI(method: method, path: path, query: query, input: input)
         }
@@ -364,11 +384,9 @@ final class MockBackend: @unchecked Sendable {
                 color: calendarKey == "private" ? "#4285F4" : "#CB1B3B"
             )
             events.append(event)
+            calendarVersion = ISODate.string(from: Date())
             createdEventIds.append(event.id)
             return encode(["event": event], status: 201)
-
-        case ("GET", "calendar-events"):
-            return encode(["events": events.sorted { $0.startISO < $1.startISO }])
 
         case ("GET", "calendar-events/config"):
             return json(["config": MockSeed.postConfig])

@@ -65,13 +65,16 @@ college-app/
 | 思い出ビデオの音源は **居住者がアップロードするMP3のみ**。YouTube音声の抽出・埋め込みは**絶対に実装しない** | YouTubeの利用規約違反・著作権侵害リスクがあるため。一度提案したが明確に却下された経緯あり |
 | 思い出ビデオの動画合成（クリップ結合+音声ミックス）は **iOS側でAVFoundationによりオンデバイスで行う**。サーバー側（Workers/外部API/自前VPS）では行わない | Cloudflare Workersはffmpeg相当の処理ができない。外部動画合成APIやVPSのコスト・運用を避けるため。Web版はこの機能を持たず、完成動画の再生のみ対応 |
 | 既存機能（いまひま・カレンダー招待・MY EVENT・表示名・イベント一覧・投稿先の選択肢・イベント作成）は**すべて新 API に移した**。別リポジトリ（`collegeCalendar/frontend`）の **Next.js API は使わない** | Next.js 側は Supabase 依存で動かなくなったため。イベント一覧もスプレッドシート廃止に伴い移した |
-| **スプレッドシートは使わない**（旧 EventCache は廃止）。共有カレンダーの予定は、新 API の Cron Trigger（15 分ごと）が GAS（`services/gas`）経由で取り、D1 の `calendar_events` に入れる。アプリの一覧は D1 を読むだけ。取得範囲は過去 30 日〜60 日先で、範囲内は毎回丸ごと入れ替える | ユーザーの指示（スプレッドシートは運用しない）。GAS は遅いので一覧表示のたびには呼ばない。過去分は日記の「イベント」用 |
+| **スプレッドシートは使わない**（旧 EventCache は廃止）。共有カレンダーの予定は、新 API の Cron Trigger（15 分ごと）が GAS（`services/gas`）経由で取り、D1 の `calendar_events` に入れる。アプリの一覧は D1 を読むだけ。取得範囲は過去 30 日〜60 日先。**既存の行と突き合わせて差分だけを書く**: 消えた予定は論理削除（`deleted_at`）、新しい予定は追加、内容が変わった予定だけ上書き。丸ごと消して入れ直さない。範囲より古い予定は同期で触らずに残す。予定が変わったときだけ版（`calendar_meta.version`）を進める。**アプリは予定を端末にキャッシュし、版が変わったときだけ読み直す**。読むのは今日から 30 日分ずつ（スクロールで次の 30 日。日記用に過去 30 日） | ユーザーの指示（スプレッドシートは運用しない）。GAS は遅いので一覧表示のたびには呼ばない。過去分は日記の「イベント」用。丸ごと入れ替えていたら 15 分ごと × 約 340 件で書き込みが 1 日 12 万行を超え、D1 無料枠（10 万行/日）に達した |
 | 共有カレンダー（000_イベント / 001_ハウス・委員会）と ROOM の**読み書きは GAS に任せる**（スクリプトの持ち主の権限で動く）。新 API ↔ GAS はシークレット（新 API の `GAS_POST_SECRET` = GAS のスクリプト プロパティ `POST_SECRET`）で守る | 寮生全員に共有カレンダーの編集権限を配ったり、サービスアカウントに Workspace 管理者の設定をしたりせずに済むため |
 
 ## 実装状況
 
 ### `apps/ios`（実装済み）
 
+- カレンダーの予定は `EventsStore` が端末にキャッシュする（`Infrastructure/Persistence/CalendarCacheFile.swift`）。
+  起動時はキャッシュを表示し、サーバーには版だけを問い合わせる（15 分以内の再問い合わせはしない。引っ張って更新は除く）。
+  最初は今日から 30 日分、カレンダーの一番下までスクロールしたら次の 30 日を読む。日記の「イベント」を開いたら過去 30 日分も読む
 - 通信先は新 API（`services/api`）だけ（Next.js API は使わなくなった）。DDD4層
   （`Domain/ Application/ Infrastructure/ Presentation/` + `Shared/`）に再編済み、ビルド確認済み
 - **既定は本番モード**（https://college-app-api.whitepenguinmatsuo.workers.dev に繋ぎ、Google ログイン必須）。
@@ -84,9 +87,11 @@ college-app/
   （レスポンス形状は`MockBackend.collegeAPI`が事実上の仕様。API実装時はこれに合わせるか、両方直すこと）
 - 交流機能（おすすめの店・気になる・誘って・空き時間・ひま募集・匿名文通）も**UI + クライアント実装済み**
   （`CollegeAPI+Social.swift`、モックは`MockBackend+Social.swift`）
-- 日記（日常・イベント）も実装済み。2 秒への切り出し・思い出ビデオの合成（`Infrastructure/Media/`）は実際に動く。
-  ただしアップロード API が未実装のため、**クリップ本体は端末内（Application Support/Clips）にだけ保存**している。
-  モックでは他の人のイベントクリップと過去の日記を`SampleClipGenerator`で生成する
+- 日記（日常・イベント）も実装済み。2 秒への切り出し（最大 1080p）・思い出ビデオの合成（`Infrastructure/Media/`）は実際に動く。
+  **イベントのクリップは新 API（`/events`）に上げて共有**し、動画本体はダウンロードして `Clips/event-cache/` にキャッシュする
+  （`EventClipsStore`。カレンダーの予定とは `rowKey` = ID + 日付で対応）。**日常のクリップは `/daily-clips` が未実装のため
+  端末内（Application Support/Clips/daily）にだけ保存**している。思い出ビデオは端末で合成して共有シートで渡すだけで、サーバーには上げない。
+  モックでは`MockBackend+Events.swift`が他の人のイベントクリップを登録し、アプリが`SampleClipGenerator`でサンプル動画を作る（過去の日記も同様）
 - タブ構成: Calendar / ひま（いまひま・募集・空き時間） / 図鑑（みんな・おすすめ店・誘って） /
   交流（コヒチャ・気になる・文通） / 日記（日常・イベント）。Settings（図鑑プロフィール編集・各種情報）は
   日記タブ右上の歯車からシートで開く
@@ -106,21 +111,24 @@ college-app/
   resident_free_slots/hima_gatherings/hima_gathering_participants/pen_pal_threads/pen_pal_letters/pen_pal_reports）、
   `0004_daily_clips.sql`（daily_clips、events.calendar_event_id）、
   `0005_hima_calendar.sql`（hima_statuses/hima_invites/invite_groups/created_calendar_events。旧 Supabase から移した既存機能）、
-  `0006_calendar_cache.sql`（calendar_events/calendar_meta。旧 EventCache スプレッドシートの置き換え）
+  `0006_calendar_cache.sql`（calendar_events/calendar_meta。旧 EventCache スプレッドシートの置き換え）、
+  `0007_calendar_soft_delete.sql`（calendar_events.deleted_at。同期で消えた予定の論理削除）
 - Hono雛形: `npm install`済み、`tsc --noEmit`通過確認済み。**実装済みエンドポイントは
   `GET /health`、`GET /attribute-categories`、認証（`POST /auth/google`・`POST /auth/logout`・`GET /auth/me`）、
   `PATCH /residents/me`、いまひま（`/hima-statuses`）、カレンダー招待（`/invite-groups`・`/invite-directory`）、
   カレンダー（`/calendar-events` の一覧・投稿先の選択肢・作成・MY EVENT）、図鑑（`/residents`・`/residents/matches`・
   `/residents/:id`・`/residents/me/attributes`・`/attributes`）、コヒチャ（`/coffee-chat-requests`）、交流機能
-  （おすすめの店・気になる・誘って・空き時間・ひま募集・匿名文通）。iOS が使うものはすべて実装済み**。
+  （おすすめの店・気になる・誘って・空き時間・ひま募集・匿名文通）、日記のイベントクリップ（`GET /events`・`POST /events/resolve`・
+  `/events/:eventId/clips` の投稿・一覧・本体取得・削除。本体は R2 の `events/<eventId>/clips/<clipId>.mp4`。R2 は公開せず
+  Worker が認証してから中継する）。iOS が使うものはすべて実装済み**。
   カレンダーの同期は Cron Trigger（`presentation/scheduled.ts`、15 分ごと）。D1 が空のとき（デプロイ直後）は一覧の初回取得でその場で同期する。
   要ログインのルートには `presentation/middleware/auth.ts` の `requireAuth` を付ける（`c.get('auth')` で residentId が取れる）。
   いずれもローカル D1（`wrangler dev --local`）で正常系・異常系を確認済み（GAS は偽のサーバーで代用）。
   本物の Google アカウントでのログインと、本物の GAS との連携は未確認
-  未実装（`501 Not Implemented`のスタブ）は写真・イベント動画（`/events/*`）・日記（`/daily-clips`）・Web 版ログインだけ。
-  iOS の日記はクリップを端末内にだけ保存しているので、これらが無くても動く
+  未実装（`501 Not Implemented`のスタブ）は写真・思い出ビデオのジョブ（`/events/:eventId/memory-video`）・
+  日記の日常（`/daily-clips`）・Web 版ログインだけ
 - D1 データベース（`college-app`、APAC）と R2 バケット（`college-app-media`）は**作成済み**、0001〜0006 のマイグレーションも
-  リモートに適用済み。API は **https://college-app-api.whitepenguinmatsuo.workers.dev にデプロイ済み**（Cron 15 分ごと）。
+  リモートに適用済み（0007 は未適用。`npm run db:migrate:remote` をデプロイより先に実行する）。API は **https://college-app-api.whitepenguinmatsuo.workers.dev にデプロイ済み**（Cron 15 分ごと）。
   GAS のシークレット登録と GAS の差し替えはユーザーが実行中。リソース作成やデプロイにはユーザー自身の
   Cloudflareアカウント認証が必要なため、エージェントは`wrangler login/d1 create/r2 bucket create/deploy`
   を勝手に実行しないこと

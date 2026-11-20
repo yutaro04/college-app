@@ -47,7 +47,8 @@ struct CalendarScreen: View {
                 addButton
             }
         }
-        .task { if events.events.isEmpty { await events.load() } }
+        // 開くたびに呼ぶが、前回の確認から 15 分以内ならサーバーには問い合わせない
+        .task { await events.load() }
         .sheet(isPresented: $showAddEvent) {
             AddEventSheet { created in
                 events.addLocalEvent(created)
@@ -121,6 +122,7 @@ struct CalendarScreen: View {
                 .foregroundStyle(Theme.textTertiary)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 64)
+            loadMoreFooter
         } else {
             LazyVStack(spacing: 0, pinnedViews: [.sectionHeaders]) {
                 ForEach(groups, id: \.dateKey) { group in
@@ -137,7 +139,20 @@ struct CalendarScreen: View {
                         DateSectionHeader(dateKey: group.dateKey, todayKey: todayKey)
                     }
                 }
+                // LazyVStack の中に置くので、一番下までスクロールして見えたときに次の 30 日を読む
+                loadMoreFooter
             }
+        }
+    }
+
+    @ViewBuilder
+    private var loadMoreFooter: some View {
+        if events.hasMore {
+            ProgressView()
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+                // 読み終わると loadedTo が変わるので、まだ見えていればもう一度読む
+                .task(id: events.loadedTo) { await events.loadMore() }
         }
     }
 

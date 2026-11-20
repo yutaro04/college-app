@@ -30,10 +30,12 @@ Web 版（Next.js PWA）の `collegeCalendar/frontend` を SwiftUI に移植し�
 | --- | --- |
 | ログイン | Google に直接ログイン（`GoogleAuth`。PKCE + `ASWebAuthenticationSession`、client secret なし）→ access token を `POST /auth/google` に送って新 API のセッショントークン（無期限）を得る。どちらもキーチェーンに保存し、ログアウトするまで残す |
 | 表示名・ひま・招待グループ・MY EVENT | 新 API（`/residents/me`・`/hima-statuses`・`/invite-groups`・`/invite-directory`・`/calendar-events/mine`） |
-| イベント一覧 | 新 API `GET /calendar-events`（サーバーが GAS から取って D1 に溜めたもの） |
+| イベント一覧 | 新 API `GET /calendar-events`（サーバーが GAS から取って D1 に溜めたもの）。今日から 30 日分ずつ読み、端末にキャッシュする（`EventsStore` / `CalendarCacheFile`）。サーバーの版が変わったときだけ読み直す |
 | 投稿フォームの設定 | 新 API `GET /calendar-events/config` |
 | イベント作成 | 新 API `POST /calendar-events`（プライベートのときは端末の Google access token を添える） |
-| 図鑑・交流・日記 | 新 API |
+| 図鑑・交流 | 新 API |
+| 日記（イベント） | 新 API `/events`（`POST /events/resolve` で投稿先を用意 → クリップを multipart で投稿・一覧・削除）。動画本体は R2 にあり、`GET /events/:eventId/clips/:clipId/file` でダウンロードして `Clips/event-cache/` にキャッシュする |
+| 日記（日常） | 端末内だけ（`Clips/daily/`。`/daily-clips` が未実装のため） |
 
 ---
 
@@ -101,8 +103,9 @@ Xcode から実行する場合は、デバイスを選んで ⌘R でよい。
 - 初期データは `MockSeed.swift`（人物・会社名はすべて架空）。アプリを再起動すると初期状態に戻る
 - ひまを表明すると、約 10 秒後に誰かから誘いが届いたことになる（30 秒ポーリングで通知される）
 - 文通で手紙を送ると約 15 秒後に相手から返事が来る。ひま募集を立てると約 10 秒後に誰かが参加する
-- 日記: 初回起動時に過去 2 週間分（ところどころ抜け）のサンプル日記を生成する。イベントのクリップも開いたときに
-  他の人の分として 3 本生成する（`Infrastructure/Mock/SampleClipGenerator.swift`）
+- 日記: 初回起動時に過去 2 週間分（ところどころ抜け）のサンプル日記を生成する。イベントは開いたときに
+  モックのサーバー（`MockBackend+Events.swift`）が他の人のクリップを 3 本登録し、アプリはダウンロードの代わりに
+  サンプル動画をその場で生成する（`Infrastructure/Mock/SampleClipGenerator.swift`）
 - 最初に開くタブを指定: `-InitialTab calendar|hima|directory|connect|diary`
 - タブ内のセグメントも指定できる: `-InitialSegment now|gather|free|people|recommendations|wishes|coffeeChat|likes|penPal|daily|event`
 
@@ -236,7 +239,7 @@ CollegeApp/
 - ~~コーヒーチャット申請（1on1 のお誘い）~~ → UI実装済み（モックデータで動作）
 - 顔写真・紙の図鑑のスキャン画像・関連写真の投稿
 - ~~イベントごとの短尺動画クリップの投稿~~ → 日記タブに実装済み（日常用の毎日 2 秒と分けている）。
-  アップロード API が未実装のため、現状クリップは端末内にだけ保存される
+  イベントのクリップは新 API に上げてみんなで共有する。日常のクリップはアップロード API が未実装のため端末内にだけある
 - **思い出ビデオの生成は iOS 側の責務**（`Infrastructure/Media/MemoryVideoComposer.swift` で実装済み）: `AVMutableComposition` + `AVAssetExportSession` で
   クリップを連結し、居住者がアップロードした MP3 を `AVMutableAudioMix` でミックスして
   オンデバイスで書き出す（サーバー側では合成処理を行わない）。Web 版は完成した動画の再生のみ対応。

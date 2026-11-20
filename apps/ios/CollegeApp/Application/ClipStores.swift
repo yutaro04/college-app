@@ -91,63 +91,132 @@ final class DiaryStore {
     }
 }
 
-/// イベントごとのクリップ。参加者みんなで撮って、みんなで見る
+/// イベントごとのクリップ。参加者みんなで撮って、みんなで見る。
+///
+/// クリップは新 API（`/events`）に上げて共有する。動画本体は R2 にあり、見るときに端末へダウンロードしてキャッシュする
+/// （`ClipFileStore.eventClipURL`）。カレンダーの予定とサーバーのイベントは `CalendarEvent.rowKey`（ID + 日付）で対応させる
 @MainActor
 @Observable
 final class EventClipsStore {
-    private(set) var clipsByEvent: [String: [ClipFileStore.EventClip]] = [:]
-    private(set) var preparingSamples = false
+    private(set) var clipsByEvent: [String: [EventClip]] = [:]
+    /// rowKey → クリップ数（一覧用。`GET /events` の結果）
+    private(set) var counts: [String: Int] = [:]
+    /// rowKey → サーバーのイベント ID
+    private var eventIds: [String: String] = [:]
+    /// ダウンロード済み（キャッシュにある）クリップの ID。サムネイルの表示切り替えに使う
+    private(set) var cached: Set<String> = []
+    private(set) var loading = false
+    private(set) var error: String?
 
-    func clips(for event: CalendarEvent) -> [ClipFileStore.EventClip] {
-        clipsByEvent[ClipFileStore.eventKey(for: event)] ?? []
+    /// 一覧で数を出す範囲（カレンダーの同期範囲 = 過去 30 日より少し広め）
+    private static let countDays = 60
+
+    func clips(for event: CalendarEvent) -> [EventClip] {
+        clipsByEvent[event.rowKey] ?? []
     }
 
     func count(for event: CalendarEvent) -> Int {
-        clipsByEvent[ClipFileStore.eventKey(for: event)]?.count ?? ClipFileStore.eventClipCount(eventKey: ClipFileStore.eventKey(for: event))
+        clipsByEvent[event.rowKey]?.count ?? counts[event.rowKey] ?? 0
     }
 
-    func load(_ event: CalendarEvent) async {
-        let key = ClipFileStore.eventKey(for: event)
-        var clips = ClipFileStore.eventClips(eventKey: key)
-        if AppConfig.useMockAPI, clips.isEmpty {
-            await seedSamples(for: event, key: key)
-            clips = ClipFileStore.eventClips(eventKey: key)
+    /// キャッシュにあればそのファイル。まだダウンロード中なら nil
+    func localURL(_ clip: EventClip) -> URL? {
+        cached.contains(clip.id) ? ClipFileStore.eventClipURL(clip) : nil
+    }
+
+    /// 一覧用に、最近のイベントのクリップ数をまとめて取る
+    func loadCounts() async {
+        let today = Date()
+        let from = Calendar.current.date(byAdding: .day, value: -Self.countDays, to: today)!
+        guard let events = try? await CollegeAPI.events(from: DateUtil.dateKey(from), to: DateUtil.dateKey(today)) else {
+            return
         }
-        clipsByEvent[key] = clips
+        for event in events {
+            guard let calendarId = event.calendarEventId else { continue }
+            let key = "\(calendarId)-\(event.eventDate)"
+            counts[key] = event.clipCount
+            eventIds[key] = event.id
+        }
     }
 
-    func add(source: URL, to event: CalendarEvent, authorId: String) async throws {
-        let key = ClipFileStore.eventKey(for: event)
-        let destination = ClipFileStore.newEventClipURL(eventKey: key, authorId: authorId)
-        try await ClipProcessing.trimToClip(source: source, destination: destination)
-        clipsByEvent[key] = ClipFileStore.eventClips(eventKey: key)
+    /// イベントを開いたとき: クリップ一覧を取り、まだ手元に無い動画をダウンロードする
+    func load(_ event: CalendarEvent) async {
+        loading = clipsByEvent[event.rowKey] == nil
+        error = nil
+        defer { loading = false }
+        do {
+            let eventId = try await resolve(event)
+            let clips = try await CollegeAPI.eventClips(eventId: eventId)
+            clipsByEvent[event.rowKey] = clips
+            counts[event.rowKey] = clips.count
+            await fetchFiles(clips)
+        } catch {
+            self.error = error.localizedDescription
+        }
     }
 
-    func delete(_ clip: ClipFileStore.EventClip, from event: CalendarEvent) {
-        ClipFileStore.delete(clip.url)
-        let key = ClipFileStore.eventKey(for: event)
-        clipsByEvent[key] = ClipFileStore.eventClips(eventKey: key)
+    func add(source: URL, to event: CalendarEvent) async throws {
+        let eventId = try await resolve(event)
+        let trimmed = ClipFileStore.newPendingClipURL()
+        defer { ClipFileStore.delete(trimmed) }
+        try await ClipProcessing.trimToClip(source: source, destination: trimmed)
+        let durationMs = await ClipProcessing.durationMs(of: trimmed)
+        let clip = try await CollegeAPI.uploadEventClip(eventId: eventId, file: trimmed, durationMs: durationMs)
+        // 自分で撮ったものはダウンロードし直さずにキャッシュへ移す
+        try? FileManager.default.moveItem(at: trimmed, to: ClipFileStore.eventClipURL(clip))
+        if ClipFileStore.isCached(clip) { cached.insert(clip.id) }
+        clipsByEvent[event.rowKey, default: []].append(clip)
+        counts[event.rowKey] = clipsByEvent[event.rowKey]?.count
     }
 
-    /// イベントの思い出ビデオは居住者が用意した音源が必須（`event_memory_videos.music_r2_key` が NOT NULL）
+    func delete(_ clip: EventClip, from event: CalendarEvent) async throws {
+        try await CollegeAPI.deleteEventClip(clip)
+        ClipFileStore.delete(ClipFileStore.eventClipURL(clip))
+        cached.remove(clip.id)
+        clipsByEvent[event.rowKey]?.removeAll { $0.id == clip.id }
+        counts[event.rowKey] = clipsByEvent[event.rowKey]?.count
+    }
+
+    /// イベントの思い出ビデオは居住者が用意した音源が必須（`event_memory_videos.music_r2_key` が NOT NULL）。
+    /// まだダウンロードできていないクリップは入れない
     func compose(_ event: CalendarEvent, music: URL) async throws -> URL {
         let output = ClipFileStore.newExportURL()
-        try await MemoryVideoComposer.compose(clips: clips(for: event).map(\.url), music: music, to: output)
+        try await MemoryVideoComposer.compose(clips: clips(for: event).compactMap(localURL), music: music, to: output)
         return output
     }
 
-    /// モック用: 他の居住者が撮ったことにしたサンプルを 3 本作る
-    private func seedSamples(for event: CalendarEvent, key: String) async {
-        preparingSamples = true
-        defer { preparingSamples = false }
-        let authors = MockSeed.residents.filter { $0.id != MockSeed.myId }.shuffled().prefix(3)
-        for (index, author) in authors.enumerated() {
-            try? await SampleClipGenerator.generate(
-                to: ClipFileStore.newEventClipURL(eventKey: key, authorId: author.id),
-                title: event.title.count > 10 ? String(event.title.prefix(10)) + "…" : event.title,
-                subtitle: "by \(author.name)",
-                hue: CGFloat(index) * 0.3 + 0.05
-            )
+    private func resolve(_ event: CalendarEvent) async throws -> String {
+        if let id = eventIds[event.rowKey] { return id }
+        let id = try await CollegeAPI.resolveEvent(event).id
+        eventIds[event.rowKey] = id
+        return id
+    }
+
+    /// キャッシュに無い動画を 3 本ずつ並行して取る
+    private func fetchFiles(_ clips: [EventClip]) async {
+        for clip in clips where ClipFileStore.isCached(clip) { cached.insert(clip.id) }
+        let missing = clips.filter { !cached.contains($0.id) }
+        for batch in stride(from: 0, to: missing.count, by: 3).map({ Array(missing[$0..<min($0 + 3, missing.count)]) }) {
+            await withTaskGroup(of: String?.self) { group in
+                for clip in batch {
+                    group.addTask { await Self.fetch(clip) ? clip.id : nil }
+                }
+                for await id in group {
+                    if let id { cached.insert(id) }
+                }
+            }
         }
+    }
+
+    private nonisolated static func fetch(_ clip: EventClip) async -> Bool {
+        let destination = ClipFileStore.eventClipURL(clip)
+        if AppConfig.useMockAPI, clip.id.hasPrefix(MockBackend.sampleClipPrefix) {
+            // モックのサーバーは動画本体を持たないので、他の人が撮ったことにしたサンプルをその場で作る
+            return (try? await SampleClipGenerator.generate(
+                to: destination, title: "サンプル", subtitle: "by \(clip.author.displayName)",
+                hue: CGFloat(UInt(bitPattern: clip.id.hashValue) % 100) / 100
+            )) != nil
+        }
+        return (try? await CollegeAPI.downloadEventClip(clip, to: destination)) != nil
     }
 }

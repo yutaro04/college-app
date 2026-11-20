@@ -63,11 +63,16 @@ export interface CalendarSource {
 
 // 予定のキャッシュ（D1）
 export interface CalendarCacheRepository {
-  // 開始が `before` より前の予定を `events` で丸ごと置き換え、同期時刻を記録する（1 トランザクション）
-  replaceBefore(before: string, events: CalendarEvent[], syncedAt: string): Promise<void>
-  upsert(event: CalendarEvent): Promise<void>
-  list(): Promise<CalendarEvent[]>
-  lastSync(): Promise<string | null>
+  // [from, to) に始まる予定を `events` と同じにする（1 トランザクション）。
+  // 差分だけを書く。消えた予定は論理削除（D1 の書き込み行数を抑えるため）。範囲より古い予定には触らない。
+  // 何か変わったときだけ（と初回だけ）版を `syncedAt` に進める
+  syncRange(from: string, to: string, events: CalendarEvent[], syncedAt: string): Promise<void>
+  // 1 件だけ追加・上書きし、版を `changedAt` に進める（共有カレンダーに作った直後）
+  upsert(event: CalendarEvent, changedAt: string): Promise<void>
+  // 開始が [from, to) の、削除されていない予定（開始日時順）
+  list(from: string, to: string): Promise<CalendarEvent[]>
+  // 予定のデータの版（最後に中身が変わった時刻）。アプリはこれでキャッシュが古いかを判断する。未同期なら null
+  version(): Promise<string | null>
   savePostConfig(config: PostConfig): Promise<void>
   loadPostConfig(): Promise<PostConfig | null>
 }

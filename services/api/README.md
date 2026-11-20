@@ -170,8 +170,12 @@ Android で同等機能を作る場合は `Media3 Transformer`（Jetpack）が A
 
 | Method | Path | 説明 |
 | --- | --- | --- |
-| POST | `/events/:eventId/clips` | multipart アップロード `{file}`（2秒程度、アプリ側でトリミング前提）→ `EventVideoClip` 作成 |
-| GET | `/events/:eventId/clips` | クリップ一覧（合成端末がダウンロードする素材） |
+| GET | `/events?from=&to=` | **実装済み**。期間内（yyyy-MM-dd、最大 366 日）のイベント（D1 に行があるもの）とクリップ数 `{ events: [{ id, title, eventDate, calendarEventId, clipCount }] }`。日記のイベント一覧の本数表示用 |
+| POST | `/events/resolve` | **実装済み**。`{calendarEventId, eventDate}` → `{event}`（find-or-create）。行が無いときはカレンダーのキャッシュ（`calendar_events`）に実在する予定だけ作り、タイトルもそこから取る（無ければ 404） |
+| POST | `/events/:eventId/clips` | **実装済み**。multipart `{file, durationMs?}`（mp4。アプリが 2 秒・最大 1080p に切り出してから送る。30MB まで、1 人 1 イベント 20 本まで）→ R2 の `events/<eventId>/clips/<clipId>.mp4` に置き `{clip}`（201） |
+| GET | `/events/:eventId/clips` | **実装済み**。みんなのクリップ（古い順）`{ clips: [{ id, eventId, residentId, author, durationMs, createdAt }] }` |
+| GET | `/events/:eventId/clips/:clipId/file` | **実装済み**。動画本体。R2 は公開せず、Worker がログインを確かめてから中継する（`Cache-Control: private, immutable`） |
+| DELETE | `/events/:eventId/clips/:clipId` | **実装済み**。自分のクリップだけ（他人のは 403）。R2 からも消す（204） |
 | POST | `/events/:eventId/memory-video` | multipart アップロード `{musicFile}`（MP3）→ R2 に保存しジョブ作成（`pending`） |
 | GET | `/events/:eventId/memory-video` | ジョブの状態・クリップ/MP3のURL（合成待ち）・完成動画URL（完成後）を取得 |
 | PATCH | `/events/:eventId/memory-video` | 合成端末（iOS）からの状態更新。`{status: "processing"}` で合成開始を宣言（二重実行防止）、`{status: "completed", file}`（multipart）で完成動画をアップロード、`{status: "failed", errorMessage}` で失敗報告 |
@@ -190,6 +194,7 @@ Android で同等機能を作る場合は `Media3 Transformer`（Jetpack）が A
 
 - カレンダーのイベントは Google カレンダー由来で D1 の `events` に行が無いので、
   `POST /events/resolve` で `calendar_event_id + event_date` から find-or-create してから `/events/:id/clips` に投稿する
+- イベントのクリップは誰でも見られる（ログインしていれば）。投稿者の名前も出す（匿名ではない）
 - 長さ 2 秒はアプリ側で切り出してからアップロードする（DB では強制しない）
 
 | Method | Path | 説明 |
@@ -197,7 +202,6 @@ Android で同等機能を作る場合は `Media3 Transformer`（Jetpack）が A
 | GET | `/daily-clips?from=&to=` | 自分の日記クリップ一覧 |
 | PUT | `/daily-clips/:date` | multipart `{file, caption?}`。その日のクリップを作成 or 上書き |
 | DELETE | `/daily-clips/:date` | |
-| POST | `/events/resolve` | `{calendarEventId, title, eventDate}` → `{event}`（find-or-create） |
 
 ### 交流機能
 
@@ -270,17 +274,19 @@ api/
 │                      ResidentPhoto, Event, EventVideoClip, EventMemoryVideo 等）
 ├─ application/       ユースケース（ドメイン層のオーケストレーション）
 ├─ infrastructure/    D1 アクセス・Google OAuth クライアントなど外部連携の実装
-│  └─ db/migrations/  D1 スキーマ定義
+│  ├─ db/migrations/  D1 スキーマ定義
+│  └─ storage/        R2（写真・動画の本体）
 └─ presentation/      Hono のルーティング・ハンドラ
    ├─ worker.ts        Workers エントリーポイント（ルート一式を mount）
    ├─ env.ts           Bindings（D1 / R2）の型
    └─ routes/          リソースごとの Hono サブルーター
 ```
 
-iOS アプリが使うエンドポイントはすべて実装済み（認証・図鑑・属性・コヒチャ・交流機能・既存機能）。
+iOS アプリが使うエンドポイントはすべて実装済み（認証・図鑑・属性・コヒチャ・交流機能・既存機能・イベントのクリップ）。
 **未実装（`501 Not Implemented` のスタブ。`presentation/routes/_notImplemented.ts`）は、写真（`/residents/:id/photos`・
-`/residents/me/photos`）・イベント動画（`/events/*`）・日記（`/daily-clips`）・Web 版ログイン（`/auth/google/start`・`/callback`）**。
-iOS の日記はクリップを端末内にだけ保存しているので、これらが無くても動く。
+`/residents/me/photos`）・思い出ビデオのジョブ（`/events/:eventId/memory-video`）・日記の日常（`/daily-clips`）・
+Web 版ログイン（`/auth/google/start`・`/callback`）**。
+iOS は思い出ビデオをその場で端末内に合成して終わり、日常のクリップは端末内にだけ保存しているので、これらが無くても動く。
 
 実装済みの部分の、モックとの意図的な違い（iOS は影響を受けない）:
 - 他人のもの・存在しないものの削除は 404（モックは黙って 200）。削除の成功は 204
@@ -332,7 +338,7 @@ npm run typecheck
 | GET | `/invite-directory` | カレンダー招待の候補（ログインしたことのある居住者の名前とメールアドレス） |
 | GET / POST | `/invite-groups` | 自分の招待グループ一覧 / `{ name, emails }` で作成 |
 | DELETE | `/invite-groups/:id` | 自分のグループだけ消せる（他人のものは 404） |
-| GET | `/calendar-events` | 共有カレンダーの予定 `{ events, lastSync }`（過去 30 日〜60 日先・開始日時順）。D1 のキャッシュを返す。一度も同期していなければその場で同期する |
+| GET | `/calendar-events?from=&to=&version=` | 共有カレンダーの予定（開始日時順）。`from`/`to` は日本時間の yyyy-MM-dd（両端を含む。最大 62 日。省略時は過去 30 日〜60 日先）。`version` が今の版と同じなら予定を読まずに `{ notModified: true, version }`、違えば `{ notModified: false, version, events, hasMore }`（`hasMore` は同期範囲の 60 日先より手前までしか頼まれていないとき true）。D1 のキャッシュを返す。一度も同期していなければその場で同期する |
 | GET | `/calendar-events/config` | 投稿先カレンダーと ROOM の選択肢 `{ config: { calendars, rooms } }`（末尾に「プライベート」を足す） |
 | POST | `/calendar-events` | Google カレンダーにイベントを作る（入力の検証規則は旧 Next.js と同じ）。`event` / `house` は GAS の Web アプリ経由（`GAS_WEBAPP_URL` / `GAS_POST_SECRET` が必要）。`private` は本文の `googleAccessToken`（アプリが持つ本人のトークン）で本人の primary カレンダーに直接作る。共有カレンダーに作った予定はその場で D1 にも入れる（次の同期を待たずに一覧に出る） |
 | GET | `/calendar-events/mine` | 自分が作ったイベントの ID（Calendar の MY EVENT 用） |
@@ -343,7 +349,14 @@ npm run typecheck
   プライベートカレンダーへの投稿は、アプリが端末に持つ本人の access token をその都度受け取って使う
 - **カレンダーの予定は D1 にキャッシュする**（旧 EventCache スプレッドシートの置き換え）。Cron Trigger
   （`wrangler.jsonc` の `triggers.crons`、15 分ごと。`presentation/scheduled.ts`）が GAS から過去 30 日〜60 日先の予定を取り、
-  `calendar_events` の「開始が範囲の終わりより前」の行を丸ごと入れ替える（カレンダーから消えた予定も消える）。
+  範囲内に始まる `calendar_events` の行と突き合わせ、**差分だけを書く**。カレンダーから消えた予定は論理削除（`deleted_at` を入れる）、
+  新しい予定は追加、内容が変わった予定（と、消えた後に戻ってきた予定）だけ上書きする。変わらない予定には何も書かない。
+  範囲より古い予定は同期で触らずに残す（日記の「イベント」の過去分。一覧 API は返さない）。
+  D1 は書いた行数（インデックス更新込み）で制限されるため。丸ごと入れ替えていたときは 1 日 12 万行以上書いて無料枠（10 万行/日）を超えた。
+  物理削除はインデックスの分まで数えられるが、論理削除はインデックス列を変えないので 1 行で済む
+- **版（`calendar_meta` の `version`）は予定が変わったときだけ進める**（同期で差分があったとき・共有カレンダーに作ったとき）。
+  変化の無い同期は 1 行も書かない。アプリは予定を版と一緒に端末に保存し、`GET /calendar-events` に版を添えて問い合わせる。
+  同じなら D1 は版の 1 行を読むだけで済む。アプリは今日から 30 日分ずつ読み、スクロールで次の 30 日を頼む
   同期に失敗しても D1 は前回の内容のまま（batch は 1 トランザクション）。GAS は 1 回数秒かかるので一覧表示のたびには呼ばない
 - 繰り返し予定は回ごとに同じイベント ID で現れるので、`calendar_events` の主キーは `(event_id, start_iso)`
 - GAS のシークレットは `wrangler secret put GAS_WEBAPP_URL` / `wrangler secret put GAS_POST_SECRET` で設定する。
@@ -366,7 +379,8 @@ npm run typecheck
 - [x] デプロイ（https://college-app-api.whitepenguinmatsuo.workers.dev。マイグレーション 0001〜0006 適用済み）
 - [ ] GAS のシークレット登録（`GAS_WEBAPP_URL` / `GAS_POST_SECRET`）と GAS（`services/gas`）の差し替え
 - [x] 図鑑・属性・コヒチャ・交流機能のエンドポイントの実装
-- [ ] 写真・イベント動画・日記のアップロード（R2）のエンドポイントの実装
+- [x] イベントのクリップの共有（`/events`・`/events/resolve`・`/events/:eventId/clips`。R2 に保存）
+- [ ] 写真・思い出ビデオのジョブ・日記（日常）のアップロード（R2）のエンドポイントの実装
 - [x] 自前セッション認証（ネイティブアプリ用 `POST /auth/google`・ログアウト・`/auth/me`・`requireAuth`）
 - [ ] Web 版用の Cookie ログイン（`/auth/google/start`・`/auth/google/callback`）
 - [x] 旧 Supabase の既存機能（いまひま・招待グループ・MY EVENT）と、Next.js の `/api/events*` の移植

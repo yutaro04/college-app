@@ -132,12 +132,27 @@ extension CollegeAPI {
         let rooms: [RoomOption]
     }
 
-    /// GET /calendar-events — 共有カレンダーの予定（過去 30 日〜60 日先）。
-    /// サーバーが 15 分ごとに GAS から取り直して D1 に溜めたもの
-    static func calendarEvents() async throws -> [CalendarEvent] {
-        struct Response: Decodable { let events: [CalendarEvent] }
-        let body: Response = try await send(path: "/calendar-events")
-        return body.events
+    /// GET /calendar-events?from=&to=&version= — 共有カレンダーの予定（日本時間の日付。両端を含む）。
+    /// サーバーが 15 分ごとに GAS から取り直して D1 に溜めたもの。手元のキャッシュの版を送ると、
+    /// 変わっていなければ予定を返さずに `.notModified` になる
+    static func calendarEvents(from: String, to: String, version: String?) async throws -> CalendarPage {
+        struct Response: Decodable {
+            let notModified: Bool
+            let version: String
+            let events: [CalendarEvent]?
+            let hasMore: Bool?
+        }
+        var query = [URLQueryItem(name: "from", value: from), URLQueryItem(name: "to", value: to)]
+        if let version { query.append(URLQueryItem(name: "version", value: version)) }
+        let body: Response = try await send(path: "/calendar-events", query: query)
+        if body.notModified { return .notModified }
+        return .page(version: body.version, events: body.events ?? [], hasMore: body.hasMore ?? false)
+    }
+
+    enum CalendarPage {
+        /// 送った版が最新（手元のキャッシュをそのまま使ってよい）
+        case notModified
+        case page(version: String, events: [CalendarEvent], hasMore: Bool)
     }
 
     /// GET /calendar-events/config — 投稿先カレンダーと ROOM の選択肢（「プライベート」込み）

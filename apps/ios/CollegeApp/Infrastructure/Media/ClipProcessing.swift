@@ -18,14 +18,15 @@ enum ClipProcessing {
     /// 1 本あたりの長さ（setlog の 1 秒より少し長い 2 秒）
     static let clipSeconds = 2.0
 
-    /// 撮影・選択した動画の先頭 2 秒を mp4 で書き出す。既存ファイルは上書きする
+    /// 撮影・選択した動画の先頭 2 秒を mp4（最大 1080p）で書き出す。既存ファイルは上書きする。
+    /// イベントのクリップはこのままアップロードするので、4K で撮った動画も 1080p に落として軽くする
     static func trimToClip(source: URL, destination: URL) async throws {
         let asset = AVURLAsset(url: source)
         guard try await !asset.loadTracks(withMediaType: .video).isEmpty else { throw ClipError.noVideoTrack }
         let duration = try await asset.load(.duration)
         let length = CMTimeMinimum(duration, CMTime(seconds: clipSeconds, preferredTimescale: 600))
 
-        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetHighestQuality) else {
+        guard let export = AVAssetExportSession(asset: asset, presetName: AVAssetExportPreset1920x1080) else {
             throw ClipError.exportFailed("export session")
         }
         let temp = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID().uuidString).mp4")
@@ -39,6 +40,12 @@ enum ClipProcessing {
 
         try? FileManager.default.removeItem(at: destination)
         try FileManager.default.moveItem(at: temp, to: destination)
+    }
+
+    /// 動画の長さ（ミリ秒）。読めなければ nil
+    static func durationMs(of url: URL) async -> Int? {
+        guard let duration = try? await AVURLAsset(url: url).load(.duration), duration.isNumeric else { return nil }
+        return Int((duration.seconds * 1000).rounded())
     }
 
     /// 先頭フレームのサムネイル（向きを反映する）

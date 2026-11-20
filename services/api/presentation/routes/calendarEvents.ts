@@ -24,9 +24,15 @@ calendarEventsRoute.onError((e, c) => {
   throw e
 })
 
-// GET /calendar-events — 共有カレンダーの予定（過去 30 日〜60 日先。開始日時順）
+// GET /calendar-events?from=&to=&version= — 共有カレンダーの予定（開始日時順）。
+// from / to は日本時間の yyyy-MM-dd（省略時は過去 30 日〜60 日先）。version が今の版と同じなら { notModified: true }
 calendarEventsRoute.get('/', async (c) => {
-  return c.json(await listCalendarEvents(gasGateway(c.env), new D1CalendarCacheRepository(c.env.DB)))
+  const result = await listCalendarEvents(gasGateway(c.env), new D1CalendarCacheRepository(c.env.DB), {
+    from: c.req.query('from'),
+    to: c.req.query('to'),
+    version: c.req.query('version'),
+  })
+  return c.json(result)
 })
 
 // GET /calendar-events/config — 投稿先カレンダーと ROOM の選択肢（末尾に「プライベート」を足す）

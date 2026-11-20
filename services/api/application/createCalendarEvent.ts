@@ -83,7 +83,7 @@ export async function createCalendarEvent(
       throw new UseCaseError(502, e instanceof Error ? e.message : 'カレンダーサービスへの接続に失敗しました')
     })
     // 次の定期同期を待たずに一覧へ出す。失敗しても次の同期で入る
-    await deps.cache.upsert(event).catch((e) => console.error('calendar_events', e))
+    await deps.cache.upsert(event, new Date().toISOString()).catch((e) => console.error('calendar_events', e))
   }
   // MY EVENT 用の記録。失敗しても作成自体は成功扱いにする
   await deps.created.record(event.id, residentId).catch((e) => console.error('created_calendar_events', e))
